@@ -851,16 +851,25 @@ async fn geyser_subscribe(
                                                                         }
                                                                     }
                                                                     
+                                                                    // 获取签名者地址
+                                                                    let mut signer_address = "未知".to_string();
+                                                                    if let Some(accounts) = parsed_json["accounts"].as_array() {
+                                                                        if let Some(user) = accounts.iter().find(|obj| obj["name"] == "user" && obj["is_signer"] == true) {
+                                                                            signer_address = user["pubkey"].as_str().unwrap_or("未知").to_string();
+                                                                        }
+                                                                    }
+                                                                    
                                                                     // 从JSON中提取指令数据
                                                                     match decoded_ix {
                                                                         PumpProgramIx::Buy(ref buy_args) => {
                                                                             let log_message = format!(
-                                                                                "TYPE: Buy\nMINT: {}\nTOKEN AMOUNT: {}\nSOL COST: {} SOL\nTIME: {}\nSIGNATURE: {}",
+                                                                                "TYPE: Buy\nMINT: {}\nTOKEN AMOUNT: {}\nSOL COST: {} SOL\nTIME: {}\nSIGNATURE: {}\n签名者地址: {}",
                                                                                 mint_address,
                                                                                 buy_args.amount,
                                                                                 buy_args.max_sol_cost as f64 / 1_000_000_000.0,
                                                                                 formatted_time,
-                                                                                signature
+                                                                                signature,
+                                                                                signer_address
                                                                             );
                                                                             
                                                                             // 如果启用缓存，将Buy交易缓存起来
@@ -900,12 +909,13 @@ async fn geyser_subscribe(
                                                                         },
                                                                         PumpProgramIx::Sell(ref sell_args) => {
                                                                             let log_message = format!(
-                                                                                "TYPE: Sell\nMINT: {}\nTOKEN AMOUNT: {}\nMIN SOL OUTPUT: {} SOL\nTIME: {}\nSIGNATURE: {}",
+                                                                                "TYPE: Sell\nMINT: {}\nTOKEN AMOUNT: {}\nMIN SOL OUTPUT: {} SOL\nTIME: {}\nSIGNATURE: {}\n签名者地址: {}",
                                                                                 mint_address,
                                                                                 sell_args.amount,
                                                                                 sell_args.min_sol_output as f64 / 1_000_000_000.0,
                                                                                 formatted_time,
-                                                                                signature
+                                                                                signature,
+                                                                                signer_address
                                                                             );
                                                                             
                                                                             // 如果启用缓存，将Sell交易缓存起来
