@@ -33,7 +33,7 @@ account_monitoring = true
 # 是否将GRPC解析的数据缓存到内存中 (每10秒清理一次)
 enable_cache = true
 # 是否记录交易到文件
-log_to_file = true
+log_to_file = false
 # 日志文件路径
 log_file_path = "logs/transactions.log" 
 

@@ -40,7 +40,8 @@ type AccountFilterMap = HashMap<String, SubscribeRequestFilterAccounts>;
 const PUMP_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const CACHE_CLEANUP_INTERVAL_SECS: u64 = 10; // 缓存清理间隔（秒）
-const MAX_CACHE_AGE_SECS: u64 = 30; // 缓存最大有效期（秒）
+const MAX_CACHE_AGE_SECS: u64 = 30; // 内存缓存最大有效期（秒）
+const REDIS_CACHE_AGE_SECS: u64 = 3600; // Redis缓存最大有效期（1小时）
 
 // 定义缓存项结构
 #[derive(Debug, Clone)]
@@ -91,7 +92,7 @@ impl TransactionCache {
                 error!("[Redis] 缓存买入交易失败 (sig: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存买入交易 (sig: {})", key);
-                if let Err(e) = con.expire::<_, ()>(&key, MAX_CACHE_AGE_SECS as i64).await {
+                if let Err(e) = con.expire::<_, ()>(&key, REDIS_CACHE_AGE_SECS as i64).await {
                     error!("[Redis] 设置买入交易过期时间失败 (sig: {}): {}", key, e);
                 }
             }
@@ -120,7 +121,7 @@ impl TransactionCache {
                 error!("[Redis] 缓存卖出交易失败 (sig: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存卖出交易 (sig: {})", key);
-                if let Err(e) = con.expire::<_, ()>(&key, MAX_CACHE_AGE_SECS as i64).await {
+                if let Err(e) = con.expire::<_, ()>(&key, REDIS_CACHE_AGE_SECS as i64).await {
                     error!("[Redis] 设置卖出交易过期时间失败 (sig: {}): {}", key, e);
                 }
             }
@@ -149,7 +150,7 @@ impl TransactionCache {
                 error!("[Redis] 缓存账户数据失败 (key: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存账户数据 (key: {})", key);
-                if let Err(e) = con.expire::<_, ()>(&key, MAX_CACHE_AGE_SECS as i64).await {
+                if let Err(e) = con.expire::<_, ()>(&key, REDIS_CACHE_AGE_SECS as i64).await {
                     error!("[Redis] 设置账户数据过期时间失败 (key: {}): {}", key, e);
                 }
             }
