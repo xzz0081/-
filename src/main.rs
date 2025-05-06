@@ -520,8 +520,9 @@ fn calculate_price(vt: u64, vs: u64) -> f64 {
         return 0.0; // 避免除以零
     }
     // 价格公式: vs/vt （SOL储备/代币储备）
-    // 转换为SOL单位 (lamports -> SOL)
-    (vs as f64) / (vt as f64) / 1_000_000_000.0
+    // SOL精度为9，代币精度为6，需要考虑精度差异
+    // 转换为SOL单位并应用精度调整：(vs / 10^9) / (vt / 10^6) = vs / vt * 10^-3
+    (vs as f64) / (vt as f64) * 0.001
 }
 
 #[tokio::main]
