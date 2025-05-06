@@ -57,6 +57,10 @@ struct TransactionCache {
     sell_transactions: DashMap<String, CacheItem>,
     // 账户缓存
     account_data: DashMap<String, CacheItem>,
+    // 最新的账户数据，用于关联到交易中
+    latest_account_data: DashMap<String, String>, // mint -> account_data
+    // 账户中最新的虚拟储备信息，用于与交易对比
+    latest_reserves: DashMap<String, (u64, u64)>, // mint -> (virtual_token_reserves, virtual_sol_reserves)
     redis_client: Arc<redis::Client>,
 }
 
@@ -66,14 +70,58 @@ impl TransactionCache {
             buy_transactions: DashMap::new(),
             sell_transactions: DashMap::new(),
             account_data: DashMap::new(),
+            latest_account_data: DashMap::new(),
+            latest_reserves: DashMap::new(),
             redis_client,
         }
     }
 
     // 缓存买入交易
-    fn cache_buy_transaction(&self, signature: &str, data: String) {
+    fn cache_buy_transaction(&self, signature: &str, data: String, mint: Option<&str>) {
+        // 首先记录函数调用信息
+        info!("[缓存] 缓存买入交易 - 签名: {}, Mint: {:?}", signature, mint);
+        
+        let mut enhanced_data = data.clone();
+        
+        // 如果提供了mint参数，尝试获取并添加关联的账户数据
+        if let Some(mint_address) = mint {
+            // 添加Mint信息
+            enhanced_data.push_str("\n\nMINT地址:\n");
+            enhanced_data.push_str(mint_address);
+            
+            // 计算并添加绑定曲线账户信息
+            if let Some(curve_account) = calculate_curve_account_from_mint(mint_address) {
+                info!("[关联] Buy交易({})关联到曲线账户({})", signature, curve_account);
+                enhanced_data.push_str("\n\n关联曲线账户:\n");
+                enhanced_data.push_str(&curve_account);
+                
+                // 获取曲线账户数据
+                if let Some(curve_data) = self.get_account_data(&curve_account) {
+                    enhanced_data.push_str("\n\n绑定曲线账户数据:\n");
+                    enhanced_data.push_str(&curve_data);
+                    
+                    // 提取并添加虚拟储备信息
+                    if let Some((vt, vs)) = extract_reserves_from_account_data(&curve_data) {
+                        info!("[储备] Buy交易({})的虚拟储备 - 代币: {}, SOL: {}", signature, vt, vs);
+                        enhanced_data.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
+                        
+                        // 计算并添加价格信息
+                        let price = calculate_price(vt, vs);
+                        info!("[价格] Buy交易({})的代币价格: {} SOL", signature, price);
+                        enhanced_data.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", price));
+                    } else {
+                        warn!("[储备] 无法从曲线账户({})提取虚拟储备信息", curve_account);
+                    }
+                } else {
+                    warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
+                }
+            } else {
+                warn!("[关联] 无法为Mint({})计算曲线账户", mint_address);
+            }
+        }
+        
         let cache_item = CacheItem {
-            data: data.clone(),
+            data: enhanced_data.clone(),
             timestamp: SystemTime::now(),
         };
         self.buy_transactions.insert(signature.to_string(), cache_item);
@@ -88,7 +136,7 @@ impl TransactionCache {
                     return;
                 }
             };
-            if let Err(e) = con.set::<_, _, ()>(&key, &data).await {
+            if let Err(e) = con.set::<_, _, ()>(&key, &enhanced_data).await {
                 error!("[Redis] 缓存买入交易失败 (sig: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存买入交易 (sig: {})", key);
@@ -100,9 +148,51 @@ impl TransactionCache {
     }
 
     // 缓存卖出交易
-    fn cache_sell_transaction(&self, signature: &str, data: String) {
+    fn cache_sell_transaction(&self, signature: &str, data: String, mint: Option<&str>) {
+        // 首先记录函数调用信息
+        info!("[缓存] 缓存卖出交易 - 签名: {}, Mint: {:?}", signature, mint);
+        
+        let mut enhanced_data = data.clone();
+        
+        // 如果提供了mint参数，尝试获取并添加关联的账户数据
+        if let Some(mint_address) = mint {
+            // 添加Mint信息
+            enhanced_data.push_str("\n\nMINT地址:\n");
+            enhanced_data.push_str(mint_address);
+            
+            // 计算并添加绑定曲线账户信息
+            if let Some(curve_account) = calculate_curve_account_from_mint(mint_address) {
+                info!("[关联] Sell交易({})关联到曲线账户({})", signature, curve_account);
+                enhanced_data.push_str("\n\n关联曲线账户:\n");
+                enhanced_data.push_str(&curve_account);
+                
+                // 获取曲线账户数据
+                if let Some(curve_data) = self.get_account_data(&curve_account) {
+                    enhanced_data.push_str("\n\n绑定曲线账户数据:\n");
+                    enhanced_data.push_str(&curve_data);
+                    
+                    // 提取并添加虚拟储备信息
+                    if let Some((vt, vs)) = extract_reserves_from_account_data(&curve_data) {
+                        info!("[储备] Sell交易({})的虚拟储备 - 代币: {}, SOL: {}", signature, vt, vs);
+                        enhanced_data.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
+                        
+                        // 计算并添加价格信息
+                        let price = calculate_price(vt, vs);
+                        info!("[价格] Sell交易({})的代币价格: {} SOL", signature, price);
+                        enhanced_data.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", price));
+                    } else {
+                        warn!("[储备] 无法从曲线账户({})提取虚拟储备信息", curve_account);
+                    }
+                } else {
+                    warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
+                }
+            } else {
+                warn!("[关联] 无法为Mint({})计算曲线账户", mint_address);
+            }
+        }
+        
         let cache_item = CacheItem {
-            data: data.clone(),
+            data: enhanced_data.clone(),
             timestamp: SystemTime::now(),
         };
         self.sell_transactions.insert(signature.to_string(), cache_item);
@@ -117,7 +207,7 @@ impl TransactionCache {
                     return;
                 }
             };
-            if let Err(e) = con.set::<_, _, ()>(&key, &data).await {
+            if let Err(e) = con.set::<_, _, ()>(&key, &enhanced_data).await {
                 error!("[Redis] 缓存卖出交易失败 (sig: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存卖出交易 (sig: {})", key);
@@ -135,6 +225,19 @@ impl TransactionCache {
             timestamp: SystemTime::now(),
         };
         self.account_data.insert(pubkey.to_string(), cache_item);
+
+        // 尝试提取mint地址
+        if let Some(mint) = extract_mint_address_from_account_data(&data) {
+            debug!("[关联] 从账户数据中提取到mint地址: {}, 账户: {}", mint, pubkey);
+            self.latest_account_data.insert(mint.clone(), data.clone());
+            
+            // 尝试提取虚拟储备信息
+            if let Some((virtual_token_reserves, virtual_sol_reserves)) = extract_reserves_from_account_data(&data) {
+                debug!("[储备] 提取到虚拟储备 - Mint: {}, VT: {}, VS: {}", 
+                    mint, virtual_token_reserves, virtual_sol_reserves);
+                self.latest_reserves.insert(mint, (virtual_token_reserves, virtual_sol_reserves));
+            }
+        }
 
         let client_clone = Arc::clone(&self.redis_client);
         let key = pubkey.to_string();
@@ -155,6 +258,16 @@ impl TransactionCache {
                 }
             }
         });
+    }
+
+    // 获取最新的账户数据（按mint地址）
+    fn get_latest_account_data(&self, mint: &str) -> Option<String> {
+        self.latest_account_data.get(mint).map(|data| data.clone())
+    }
+    
+    // 获取最新的虚拟储备数据（按mint地址）
+    fn get_latest_reserves(&self, mint: &str) -> Option<(u64, u64)> {
+        self.latest_reserves.get(mint).map(|reserves| *reserves)
     }
 
     // 获取买入交易
@@ -219,11 +332,13 @@ impl TransactionCache {
     }
 
     // 获取缓存统计信息
-    fn get_stats(&self) -> (usize, usize, usize) {
+    fn get_stats(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.buy_transactions.len(),
             self.sell_transactions.len(),
             self.account_data.len(),
+            self.latest_account_data.len(),
+            self.latest_reserves.len(),
         )
     }
 }
@@ -399,6 +514,16 @@ pub struct DecodedInstruction {
     pub parent_program_id: Option<Pubkey>,
 }
 
+/// 使用虚拟储备数据计算价格
+fn calculate_price(vt: u64, vs: u64) -> f64 {
+    if vt == 0 {
+        return 0.0; // 避免除以零
+    }
+    // 价格公式: vs/vt （SOL储备/代币储备）
+    // 转换为SOL单位 (lamports -> SOL)
+    (vs as f64) / (vt as f64) / 1_000_000_000.0
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -475,9 +600,9 @@ async fn main() -> anyhow::Result<()> {
                 cache_clone.cleanup(Duration::from_secs(MAX_CACHE_AGE_SECS));
                 
                 // 每10次清理（约100秒）输出一次统计信息
-                let (buy_count, sell_count, account_count) = cache_clone.get_stats();
-                debug!("缓存统计: {} 个买入交易, {} 个卖出交易, {} 个账户数据",
-                    buy_count, sell_count, account_count);
+                let (buy_count, sell_count, account_count, latest_account_count, latest_reserves_count) = cache_clone.get_stats();
+                debug!("缓存统计: {} 个买入交易, {} 个卖出交易, {} 个账户数据, {} 个最新账户数据, {} 个最新储备数据",
+                    buy_count, sell_count, account_count, latest_account_count, latest_reserves_count);
             }
         });
         
@@ -739,7 +864,7 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 如果启用缓存，将Buy交易缓存起来
                                                                             if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_buy_transaction(&signature, log_message.clone());
+                                                                                cache_ref.cache_buy_transaction(&signature, log_message.clone(), Some(&mint_address));
                                                                             }
                                                                             
                                                                             if is_monitored_address_involved {
@@ -784,7 +909,7 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 如果启用缓存，将Sell交易缓存起来
                                                                             if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_sell_transaction(&signature, log_message.clone());
+                                                                                cache_ref.cache_sell_transaction(&signature, log_message.clone(), Some(&mint_address));
                                                                             }
                                                                             
                                                                             if is_monitored_address_involved {
@@ -1170,4 +1295,96 @@ pub fn decode_account_data(buf: &[u8]) -> Result<DecodedAccount, AccountDecodeEr
             message: "未找到账户的鉴别器".to_string(),
         }),
     }
+}
+
+/// 从账户数据中提取mint地址
+/// 通过反向计算PDA的方式找到与绑定曲线账户关联的mint地址
+fn extract_mint_address_from_account_data(account_data_str: &str) -> Option<String> {
+    if account_data_str.contains("BondingCurve") {
+        // 从账户数据中提取pubkey
+        if let Some(pubkey_line) = account_data_str.lines().find(|line| line.trim().starts_with("PUBKEY:")) {
+            let pubkey_str = pubkey_line.trim().strip_prefix("PUBKEY:").unwrap_or("").trim();
+            if let Ok(curve_pubkey) = Pubkey::from_str(pubkey_str) {
+                // PumpFun程序ID
+                let pump_program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+                if let Ok(program_id) = Pubkey::from_str(pump_program_id) {
+                    // 从实际交易数据中看到的mint地址列表
+                    let common_mints = [
+                        "DCLjJRAP4PineCmCabTKRrTVsSaggkmfgBj8AMPapump",
+                        "4qMyinhBRrePr82BjoKheaXocfTXChBMk3TWifHypump",
+                        "7kJzws2KnTV73d16ZuifeFmSyupxYkp7CPYenV3Apump",
+                        "FqF6Ac1j71qjTxjg9mJag3zrmmnxVtXJQTxZjSPdpump",
+                        // 可以添加更多已知的mint地址
+                    ];
+                    
+                    // 遍历已知mint地址并验证
+                    for mint_str in common_mints.iter() {
+                        if let Ok(mint_pubkey) = Pubkey::from_str(mint_str) {
+                            // 验证PDA
+                            let seeds = &[b"bonding-curve", mint_pubkey.as_ref()];
+                            let (derived_pubkey, _) = Pubkey::find_program_address(seeds, &program_id);
+                            
+                            if derived_pubkey == curve_pubkey {
+                                debug!("[PDA] 成功反向计算: 曲线账户({}) -> Mint地址({})", pubkey_str, mint_str);
+                                return Some(mint_str.to_string());
+                            }
+                        }
+                    }
+                    
+                    // 如果没有匹配的mint，记录日志
+                    debug!("[PDA] 无法找到曲线账户({})对应的mint地址", pubkey_str);
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// 从账户数据中提取虚拟储备信息
+fn extract_reserves_from_account_data(account_data_str: &str) -> Option<(u64, u64)> {
+    if account_data_str.contains("BondingCurve") {
+        // 查找虚拟代币储备
+        let vt_line = account_data_str.lines()
+            .find(|line| line.trim().contains("VIRTUAL TOKEN RESERVES"));
+        let vs_line = account_data_str.lines()
+            .find(|line| line.trim().contains("VIRTUAL SOL RESERVES"));
+        
+        if let (Some(vt_line), Some(vs_line)) = (vt_line, vs_line) {
+            // 提取数值
+            let vt_str = vt_line.trim().split(':').last()?.trim();
+            let vs_str = vs_line.trim().split(':').last()?.trim();
+            
+            // 尝试解析为数字
+            if let (Ok(vt), Ok(vs)) = (vt_str.parse::<u64>(), vs_str.parse::<u64>()) {
+                debug!("[提取] 成功提取虚拟储备 - 代币: {}, SOL: {}", vt, vs);
+                return Some((vt, vs));
+            } else {
+                debug!("[提取] 无法解析虚拟储备数值: \"{}\" 和 \"{}\"", vt_str, vs_str);
+            }
+        } else {
+            debug!("[提取] 账户数据中未找到虚拟储备字段");
+        }
+    }
+    
+    None
+}
+
+/// 从mint地址计算绑定曲线账户地址
+fn calculate_curve_account_from_mint(mint: &str) -> Option<String> {
+    // PumpFun程序ID
+    let pump_program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+    
+    if let (Ok(mint_pubkey), Ok(program_id)) = (Pubkey::from_str(mint), Pubkey::from_str(pump_program_id)) {
+        // 使用mint地址和程序ID计算PDA
+        let seeds = &[b"bonding-curve", mint_pubkey.as_ref()];
+        let (derived_pubkey, _) = Pubkey::find_program_address(seeds, &program_id);
+        
+        // 返回计算出的账户地址
+        let curve_account = derived_pubkey.to_string();
+        debug!("[PDA] 从Mint({})计算出曲线账户({})", mint, curve_account);
+        return Some(curve_account);
+    }
+    
+    None
 }
