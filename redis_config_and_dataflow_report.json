@@ -1,0 +1,40 @@
+{
+  "redis_setup_and_dataflow": {
+    "I_new_transaction_data_to_redis": {
+      "main_mechanism": "Individual keys are created for each transaction data.",
+      "key_naming_scheme_current": "Transaction signature (e.g., 'JgpiDd8fT5C1qzoXqkX2g9yL1gN1zT9nFpWk6hVvY3Bw').",
+      "discovery_of_new_keys": "The system is the data source (via Geyser gRPC) and actively writes new data to Redis. It does not rely on discovering keys created externally.",
+      "data_format_in_redis": "A formatted multi-line text string. This string is constructed by concatenating various pieces of information, including decoded instruction names, account details (potentially as JSON strings), instruction data (potentially as JSON strings), the transaction signature, and, if available, Mint address, associated curve account public key, curve account data (as a string), virtual reserve information, and price information. It is not a single, pure JSON object string."
+    },
+    "II_curve_data_storage_and_association": {
+      "curve_data_storage": {
+        "mechanism": "Individual keys are created for each account's data (this includes curve data).",
+        "key_naming_scheme": "The public key of the account being cached (e.g., a bonding curve account's public key as a string like '5U3ZD1BqL3g7C3w8xJ2Qp9Y6X8z7F4A2sD1gH0jK5L').",
+        "data_format": "The account data is stored as a string. This is likely the raw or base64 encoded account data as received from Geyser, or its textual representation."
+      },
+      "association_of_transaction_with_curve_data": {
+        "process": "When a transaction is cached (e.g., in `cache_buy_transaction`), if a 'Mint address' is provided with the transaction, the system attempts to calculate the corresponding 'bonding curve account public key'. It then uses this 'curve account public key' to look up the curve data.",
+        "lookup_source": "The lookup for curve data is performed against an in-memory cache (`self.account_data` DashMap within `TransactionCache`). The current `get_account_data` implementation does NOT fall back to checking Redis if the data is not found in memory.",
+        "key_for_curve_data_in_redis": "The 'bonding curve account public key' string."
+      }
+    },
+    "III_data_processing_and_real_time": {
+      "data_arrival_order_and_dependency": {
+        "current_handling": "If curve data is not available in the in-memory cache (`self.account_data`) when a transaction is being processed, the transaction data is cached событиебез without the curve details, and a warning is logged (e.g., `warn!(\"[缓存] 未找到曲线账户({})的数据\", curve_account);`).",
+        "strategy": "The system does not wait or retry for curve data. This corresponds to 'logging a warning and processing the transaction with incomplete data'."
+      },
+      "real_time_definition": "No specific SLA for 'real-time' is defined in the code. Processing speed depends on Geyser gRPC event delivery and local processing capabilities. Timestamps (`SystemTime::now()`) are used for in-memory cache cleanup purposes.",
+      "data_volume": "Not specified in the analyzed code; depends on monitored on-chain activity.",
+      "redis_key_ttl_and_eviction": {
+        "ttl": "Yes, Redis keys for both transaction cache and account data cache are set with a TTL. The constant `REDIS_CACHE_AGE_SECS` is 3600 seconds (1 hour). This is applied using `con.expire(&key, REDIS_CACHE_AGE_SECS as i64).await`.",
+        "eviction_policy": "Not explicitly configured in the application code. It will depend on the Redis server's default configuration. TTL expiration helps manage memory by ensuring old data is automatically removed."
+      }
+    },
+    "notes_on_original_request_context": {
+      "objective": "Change the Redis key for transaction data from 'transaction signature' to 'signer address' (or a composite key involving it).",
+      "impact_on_transaction_data_key": "The method of generating the 'key' for `con.set(&key, ...)` in `cache_buy_transaction` and `cache_sell_transaction` would need to change. If 'signer address' alone is used, it might lead to data overwrites for the same signer. A composite key like 'signer_address:transaction_signature' would be safer.",
+      "impact_on_curve_data_logic": "The storage and lookup mécanisme for curve data (keyed by 'curve account public key') would largely remain unaffected by changing the transaction data's primary Redis key, as it's linked via the mint address.",
+      "data_flow_for_cache": "Transaction data is enriched with curve data (if found in memory) *before* being written to Redis. The `get_account_data` function would need modification if it were to check Redis for curve data upon an in-memory cache miss."
+    }
+  }
+} 
