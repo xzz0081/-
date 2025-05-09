@@ -3,7 +3,7 @@
 # gRPC 端点地址
 grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
 # Redis 配置
-redis_url = "redis://127.0.0.1:6379/"
+redis_url = "redis://redis:6379/"
  
 # 要监听的 Solana 地址列表
 monitored_addresses = [

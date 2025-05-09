@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grpcall-app
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./logs:/app/logs
+      # 如果需要从外部挂载配置文件，取消下面的注释
+      # - ./config.toml:/app/config.toml
+    networks:
+      - grpcall-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: grpcall-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      # 如果需要从主机访问Redis，取消下面的注释
+      # - "6379:6379"
+    networks:
+      - grpcall-network
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  grpcall-network:
+    driver: bridge 
