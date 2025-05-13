@@ -134,21 +134,22 @@ impl TransactionCache {
         self.buy_transactions.insert(signature.to_string(), cache_item);
 
         let client_clone = Arc::clone(&self.redis_client);
-        let key = signature.to_string();
+        let key = format!("tx:{}", signature); // 统一使用tx:前缀
+        let enhanced_data_clone = enhanced_data.clone(); // 克隆数据
         tokio::spawn(async move {
             let mut con = match client_clone.get_multiplexed_tokio_connection().await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("[Redis] 获取连接失败 (buy_tx - sig: {}): {}", key, e);
+                    error!("[Redis] 获取连接失败 (tx - sig: {}): {}", key, e);
                     return;
                 }
             };
-            if let Err(e) = con.set::<_, _, ()>(&key, &enhanced_data).await {
-                error!("[Redis] 缓存买入交易失败 (sig: {}): {}", key, e);
+            if let Err(e) = con.set::<_, _, ()>(&key, &enhanced_data_clone).await {
+                error!("[Redis] 缓存交易失败 (sig: {}): {}", key, e);
             } else {
-                debug!("[Redis] 成功缓存买入交易 (sig: {})", key);
+                debug!("[Redis] 成功缓存交易 (sig: {})", key);
                 if let Err(e) = con.expire::<_, ()>(&key, REDIS_CACHE_AGE_SECS as i64).await {
-                    error!("[Redis] 设置买入交易过期时间失败 (sig: {}): {}", key, e);
+                    error!("[Redis] 设置交易过期时间失败 (sig: {}): {}", key, e);
                 }
             }
         });
@@ -156,79 +157,77 @@ impl TransactionCache {
 
     // 缓存卖出交易
     fn cache_sell_transaction(&self, signature: &str, data: String, mint: Option<&str>) {
-        // 首先记录函数调用信息
-        info!("[缓存] 缓存卖出交易 - 签名: {}, Mint: {:?}", signature, mint);
-        
+        // 先提取交易信息中是否已包含创作者金库地址
         let mut enhanced_data = data.clone();
-        
-        // 如果提供了mint参数，尝试获取并添加关联的账户数据
-        if let Some(mint_address) = mint {
-            // 添加Mint信息
-            enhanced_data.push_str("\n\nMINT地址:\n");
-            enhanced_data.push_str(mint_address);
-            
-            // 计算并添加绑定曲线账户信息
-            if let Some(curve_account) = calculate_curve_account_from_mint(mint_address) {
-                info!("[关联] Sell交易({})关联到曲线账户({})", signature, curve_account);
-                enhanced_data.push_str("\n\n关联曲线账户:\n");
-                enhanced_data.push_str(&curve_account);
-                
-                // 获取曲线账户数据
-                if let Some(curve_data) = self.get_account_data(&curve_account) {
-                    enhanced_data.push_str("\n\n绑定曲线账户数据:\n");
-                    enhanced_data.push_str(&curve_data);
-                    
-                    // 提取并添加虚拟储备信息
-                    if let Some((vt, vs)) = extract_reserves_from_account_data(&curve_data) {
-                        info!("[储备] Sell交易({})的虚拟储备 - 代币: {}, SOL: {}", signature, vt, vs);
-                        enhanced_data.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
-                        
-                        // 计算并添加价格信息
-                        let price = calculate_price(vt, vs);
-                        info!("[价格] Sell交易({})的代币价格: {} SOL", signature, price);
-                        enhanced_data.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", price));
-                    } else {
-                        warn!("[储备] 无法从曲线账户({})提取虚拟储备信息", curve_account);
+        if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
+            info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+            enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+        } else {
+            // 如果未找到创作者金库地址，尝试检查是否有对应的associatedTokenProgram
+            if data.contains("associatedTokenProgram") || data.contains("associatedtokenprogram") || data.contains("associated_token_program") {
+                // 从日志中尝试提取associatedTokenProgram地址
+                if let Some(start_idx) = data.find("associatedTokenProgram") {
+                    if let Some(end_line) = data[start_idx..].find('\n') {
+                        let line = &data[start_idx..start_idx+end_line];
+                        if let Some(pubkey_start) = line.rfind(':') {
+                            let pubkey = line[pubkey_start+1..].trim();
+                            info!("[金库] Sell交易({})从associatedTokenProgram识别创作者金库地址: {}", signature, pubkey);
+                            enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", pubkey));
+                        }
                     }
-                    
-                    // 查找并添加创作者金库地址
-                    if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
-                        info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
-                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
-                    }
-                } else {
-                    warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
                 }
-            } else {
-                warn!("[关联] 无法为Mint({})计算曲线账户", mint_address);
             }
         }
-        
+
+        // 其余代码保持不变
         let cache_item = CacheItem {
-            data: enhanced_data.clone(),
+            data: enhanced_data.clone(), // 使用clone而不是移动
             timestamp: SystemTime::now(),
         };
-        self.sell_transactions.insert(signature.to_string(), cache_item);
 
-        let client_clone = Arc::clone(&self.redis_client);
-        let key = signature.to_string();
-        tokio::spawn(async move {
-            let mut con = match client_clone.get_multiplexed_tokio_connection().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("[Redis] 获取连接失败 (sell_tx - sig: {}): {}", key, e);
-                    return;
-                }
-            };
-            if let Err(e) = con.set::<_, _, ()>(&key, &enhanced_data).await {
-                error!("[Redis] 缓存卖出交易失败 (sig: {}): {}", key, e);
-            } else {
-                debug!("[Redis] 成功缓存卖出交易 (sig: {})", key);
-                if let Err(e) = con.expire::<_, ()>(&key, REDIS_CACHE_AGE_SECS as i64).await {
-                    error!("[Redis] 设置卖出交易过期时间失败 (sig: {}): {}", key, e);
+        // 如果提供了mint参数，更新最新的mint数据
+        if let Some(mint_address) = mint {
+            if !mint_address.is_empty() {
+                // 记录该mint最新的卖出交易数据
+                self.latest_account_data.insert(mint_address.to_string(), cache_item.data.clone());
+                info!("[关联] Sell交易({})关联到代币({})", signature, mint_address);
+
+                // 尝试获取曲线账户
+                if let Some(curve) = calculate_curve_account_from_mint(mint_address) {
+                    info!("[关联] Sell交易({})关联到曲线账户({})", signature, curve);
+                    
+                    // 尝试从曲线账户获取储备和价格信息
+                    if let Some(reserves_data) = self.get_account_data(&curve) {
+                        if let Some((vt, vs)) = extract_reserves_from_account_data(&reserves_data) {
+                            // 记录该mint最新的储备信息
+                            self.latest_reserves.insert(mint_address.to_string(), (vt, vs));
+                            info!("[储备] Sell交易({})的虚拟储备 - 代币: {}, SOL: {}", signature, vt, vs);
+                            
+                            // 计算价格
+                            let price = calculate_price(vt, vs);
+                            info!("[价格] Sell交易({})的代币价格: {} SOL", signature, price);
+                        }
+                    }
                 }
             }
-        });
+        }
+
+        // 缓存交易
+        self.sell_transactions.insert(signature.to_string(), cache_item);
+        
+        // 尝试存储到Redis
+        if let Ok(mut conn) = self.redis_client.get_connection() {
+            let key = format!("tx:{}", signature); // 统一使用tx:前缀
+            if let Err(e) = redis::cmd("SET").arg(&key).arg(&enhanced_data).query::<()>(&mut conn) {
+                error!("[Redis] 存储交易失败 (tx - sig: {}): {}", key, e);
+            } else {
+                debug!("[Redis] 成功缓存交易 (sig: {})", key);
+                // 设置过期时间
+                if let Err(e) = redis::cmd("EXPIRE").arg(&key).arg(REDIS_CACHE_AGE_SECS).query::<()>(&mut conn) {
+                    error!("[Redis] 设置交易过期时间失败 (sig: {}): {}", key, e);
+                }
+            }
+        }
     }
 
     // 缓存账户数据
@@ -1918,60 +1917,91 @@ fn extract_raw_cpi_log_data(
         log_data["curve_account"] = json!(curve);
     }
 
+    // 卖出操作的特殊处理 - 从associatedTokenProgram获取创建者金库地址
+    let is_sell_operation = match ix {
+        PumpProgramIx::Sell(_) => true,
+        _ => false
+    };
+
     // 尝试从账户列表中提取创作者相关信息
     if let Some(accounts_array) = accounts.as_array() {
         // 查找创作者金库 - 在新IDL中，可能有多种命名方式
         let mut creator_vault_pubkey = None;
         
-        // 1. 首先查找传统的creator_vault名称
-        let creator_vault = accounts_array.iter().find(|obj| {
-            if let Some(name) = obj["name"].as_str() {
-                let name_lower = name.to_lowercase();
-                return name_lower == "creator_vault" || 
-                       name_lower == "creatorvault" || 
-                       name_lower == "creator-vault";
-            }
-            false
-        });
-        
-        if let Some(vault) = creator_vault {
-            creator_vault_pubkey = vault["pubkey"].as_str().map(|s| s.to_string());
-        }
-        
-        // 2. 如果没找到，检查rent字段(在某些新版本中，creator_vault被误标为rent)
-        if creator_vault_pubkey.is_none() {
-            if let Some(rent) = accounts_array.iter().find(|obj| obj["name"] == "rent") {
-                // 确认这个rent不是实际的租金账户(实际的租金账户是固定的)
-                let real_rent = "54Pgg7FuLuP13dRQoFPTH4FdZHi141bQDzVwukt6m8Tk";
-                let rent_pubkey = rent["pubkey"].as_str().unwrap_or("");
-                // 如果rent不是常规租金账户，它可能是creator_vault
-                if rent_pubkey != "SysvarRent111111111111111111111111111111111" && 
-                   !rent_pubkey.is_empty() && rent_pubkey != "11111111111111111111111111111111" {
-                    creator_vault_pubkey = Some(rent_pubkey.to_string());
-                    debug!("[金库] 检测到rent({})可能是creator_vault", rent_pubkey);
-                }
-            }
-        }
-        
-        // 3. 如果仍然没找到，检查feeRecipient(有些版本混淆了fee_recipient和creator_vault)
-        if creator_vault_pubkey.is_none() {
-            if let Some(fee_recipient) = accounts_array.iter().find(|obj| {
+        // 针对卖出操作的特殊处理：associatedTokenProgram账户(索引8)实际是创建者金库地址
+        if is_sell_operation {
+            // 查找associatedTokenProgram账户作为金库地址
+            let associated_token_program = accounts_array.iter().find(|obj| {
                 if let Some(name) = obj["name"].as_str() {
                     let name_lower = name.to_lowercase();
-                    return name_lower == "feerecipient" || name_lower == "fee_recipient";
+                    return name_lower == "associatedtokenprogram" || 
+                           name_lower == "associated_token_program" || 
+                           name_lower == "associated-token-program";
                 }
                 false
-            }) {
-                let fee_pubkey = fee_recipient["pubkey"].as_str().unwrap_or("");
-                
-                // 先记录fee_recipient
-                log_data["fee_recipient"] = json!(fee_pubkey);
-                
-                // 在某些情况下，feeRecipient实际也是creator_vault
-                if creator_vault_pubkey.is_none() && !fee_pubkey.is_empty() {
-                    // 只在没有找到其他creator_vault时，将fee_recipient视为creator_vault
-                    // 这是一个备选项，但不是首选
-                    debug!("[警告] 未找到明确的creator_vault，暂时使用feeRecipient({})代替", fee_pubkey);
+            });
+            
+            if let Some(atp) = associated_token_program {
+                if let Some(atp_pubkey) = atp["pubkey"].as_str() {
+                    creator_vault_pubkey = Some(atp_pubkey.to_string());
+                    debug!("[金库] 卖出交易({})从associatedTokenProgram识别创作者金库地址: {}", signature, atp_pubkey);
+                }
+            }
+        }
+        
+        // 如果是卖出操作但未找到associatedTokenProgram，或者是其他操作类型
+        // 继续使用原有的创建者金库识别逻辑
+        if creator_vault_pubkey.is_none() {
+            // 1. 首先查找传统的creator_vault名称
+            let creator_vault = accounts_array.iter().find(|obj| {
+                if let Some(name) = obj["name"].as_str() {
+                    let name_lower = name.to_lowercase();
+                    return name_lower == "creator_vault" || 
+                           name_lower == "creatorvault" || 
+                           name_lower == "creator-vault";
+                }
+                false
+            });
+            
+            if let Some(vault) = creator_vault {
+                creator_vault_pubkey = vault["pubkey"].as_str().map(|s| s.to_string());
+            }
+            
+            // 2. 如果没找到，检查rent字段(在某些新版本中，creator_vault被误标为rent)
+            if creator_vault_pubkey.is_none() {
+                if let Some(rent) = accounts_array.iter().find(|obj| obj["name"] == "rent") {
+                    // 确认这个rent不是实际的租金账户(实际的租金账户是固定的)
+                    let real_rent = "54Pgg7FuLuP13dRQoFPTH4FdZHi141bQDzVwukt6m8Tk";
+                    let rent_pubkey = rent["pubkey"].as_str().unwrap_or("");
+                    // 如果rent不是常规租金账户，它可能是creator_vault
+                    if rent_pubkey != "SysvarRent111111111111111111111111111111111" && 
+                       !rent_pubkey.is_empty() && rent_pubkey != "11111111111111111111111111111111" {
+                        creator_vault_pubkey = Some(rent_pubkey.to_string());
+                        debug!("[金库] 检测到rent({})可能是creator_vault", rent_pubkey);
+                    }
+                }
+            }
+            
+            // 3. 如果仍然没找到，检查feeRecipient(有些版本混淆了fee_recipient和creator_vault)
+            if creator_vault_pubkey.is_none() {
+                if let Some(fee_recipient) = accounts_array.iter().find(|obj| {
+                    if let Some(name) = obj["name"].as_str() {
+                        let name_lower = name.to_lowercase();
+                        return name_lower == "feerecipient" || name_lower == "fee_recipient";
+                    }
+                    false
+                }) {
+                    let fee_pubkey = fee_recipient["pubkey"].as_str().unwrap_or("");
+                    
+                    // 先记录fee_recipient
+                    log_data["fee_recipient"] = json!(fee_pubkey);
+                    
+                    // 在某些情况下，feeRecipient实际也是creator_vault
+                    if creator_vault_pubkey.is_none() && !fee_pubkey.is_empty() {
+                        // 只在没有找到其他creator_vault时，将fee_recipient视为creator_vault
+                        // 这是一个备选项，但不是首选
+                        debug!("[警告] 未找到明确的creator_vault，暂时使用feeRecipient({})代替", fee_pubkey);
+                    }
                 }
             }
         }
@@ -1988,6 +2018,22 @@ fn extract_raw_cpi_log_data(
             }
         } else {
             debug!("[警告] 未找到creator_vault账户，交易类型: {}, signature: {}", ix.name(), signature);
+        }
+        
+        // 确保fee_recipient也被记录（如果还没有）
+        if !log_data.get("fee_recipient").is_some() {
+            if let Some(fee_recipient) = accounts_array.iter().find(|obj| {
+                if let Some(name) = obj["name"].as_str() {
+                    let name_lower = name.to_lowercase();
+                    return name_lower == "feerecipient" || name_lower == "fee_recipient";
+                }
+                false
+            }) {
+                let fee_pubkey = fee_recipient["pubkey"].as_str().unwrap_or("");
+                if !fee_pubkey.is_empty() {
+                    log_data["fee_recipient"] = json!(fee_pubkey);
+                }
+            }
         }
     }
     
@@ -2164,10 +2210,53 @@ fn extract_creator_vault_from_log(log_data: &str) -> Option<String> {
         if let Some(end_idx) = log_data[start_idx..].rfind('}') {
             let json_str = &log_data[start_idx..start_idx+end_idx+1];
             if let Ok(json_value) = serde_json::from_str::<Value>(json_str) {
+                // 1. 先尝试从creator_vault字段获取
                 if let Some(creator_vault) = json_value.get("creator_vault") {
                     if let Some(vault_str) = creator_vault.as_str() {
                         return Some(vault_str.to_string());
                     }
+                }
+                
+                // 2. 检查是否是sell操作，如果是则尝试从associatedTokenProgram获取
+                if let Some(tx_type) = json_value.get("type") {
+                    if tx_type.as_str() == Some("Sell") {
+                        // 在sell操作中，尝试从accounts_by_name中获取associatedTokenProgram
+                        if let Some(accounts) = json_value.get("accounts_by_name") {
+                            if let Some(atp) = accounts.get("associatedTokenProgram") {
+                                if let Some(pubkey) = atp.get("pubkey") {
+                                    if let Some(pubkey_str) = pubkey.as_str() {
+                                        return Some(pubkey_str.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 或者从raw_accounts中查找
+                        if let Some(raw_accounts) = json_value.get("raw_accounts") {
+                            if let Some(accounts_array) = raw_accounts.as_array() {
+                                for account in accounts_array {
+                                    if account.get("name").and_then(|n| n.as_str()) == Some("associatedTokenProgram") {
+                                        if let Some(pubkey) = account.get("pubkey").and_then(|p| p.as_str()) {
+                                            return Some(pubkey.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 特殊处理：检查associatedTokenProgram行
+    if let Some(start_idx) = log_data.find("associatedTokenProgram") {
+        if let Some(end_idx) = log_data[start_idx..].find('\n') {
+            let line = &log_data[start_idx..start_idx+end_idx];
+            if let Some(pubkey_start) = line.rfind(':') {
+                let pubkey = line[pubkey_start+1..].trim();
+                if !pubkey.is_empty() {
+                    return Some(pubkey.to_string());
                 }
             }
         }
