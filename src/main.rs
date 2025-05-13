@@ -31,6 +31,7 @@ use {
     dashmap::DashMap,
     serde_json::json,
     redis::AsyncCommands,
+    glob::glob,
 };
 
 type TxnFilterMap = HashMap<String, SubscribeRequestFilterTransactions>;
@@ -352,6 +353,9 @@ struct Features {
     log_to_file: bool,
     log_file_path: String,
     enable_cache: bool,
+    cpi_log_json: bool,               // 是否将CPI日志保存为JSON文件
+    cpi_log_json_dir: String,         // CPI日志JSON文件保存目录
+    cpi_log_json_max_files: usize,    // 保存的最大文件数量
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,6 +529,86 @@ fn calculate_price(vt: u64, vs: u64) -> f64 {
     (vs as f64) / (vt as f64) * 0.001
 }
 
+/// 用于序列化到JSON的CPI日志数据结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CpiLogEntry {
+    transaction_type: String,           // Buy 或 Sell
+    mint: String,                       // 代币Mint地址
+    token_amount: u64,                  // 代币数量
+    sol_amount: f64,                    // SOL数量（买入时为成本，卖出时为输出）
+    time: String,                       // 交易时间（ISO 8601格式）
+    signature: String,                  // 交易签名
+    signer: String,                     // 签名者地址
+    price: Option<f64>,                 // 计算出的代币价格
+    virtual_token_reserves: Option<u64>, // 虚拟代币储备
+    virtual_sol_reserves: Option<u64>,   // 虚拟SOL储备
+    curve_account: Option<String>,      // 关联的绑定曲线账户
+    creator: Option<String>,            // 创作者地址
+    creator_fee_basis_points: Option<u64>, // 创作者费用点数
+    creator_fee: Option<u64>,           // 创作者费用
+}
+
+/// 辅助函数，保存CPI日志到JSON文件
+fn save_cpi_log_to_json(entry: CpiLogEntry, dir_path: &str, max_files: usize) -> anyhow::Result<()> {
+    // 确保目录存在
+    let dir = std::path::Path::new(dir_path);
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        info!("创建CPI日志JSON目录: {:?}", dir);
+    }
+
+    // 创建文件名，使用交易签名和时间戳
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("时间错误")
+        .as_millis();
+    
+    let short_sig = if entry.signature.len() > 8 {
+        &entry.signature[0..8]
+    } else {
+        &entry.signature
+    };
+    
+    let filename = format!("{}/{}_{}.json", dir_path, short_sig, timestamp);
+
+    // 序列化并写入文件
+    let json_content = serde_json::to_string_pretty(&entry)?;
+    fs::write(&filename, json_content)?;
+    info!("保存CPI日志到JSON文件: {}", filename);
+
+    // 如果超过最大文件数，删除最旧的文件
+    if max_files > 0 {
+        // 获取所有JSON文件并按修改时间排序
+        let pattern = format!("{}/*.json", dir_path);
+        let mut files: Vec<_> = glob(&pattern)
+            .expect("读取文件列表失败")
+            .filter_map(Result::ok)
+            .collect();
+
+        // 如果文件数量超过限制
+        if files.len() > max_files {
+            // 按修改时间排序（最旧的在前面）
+            files.sort_by(|a, b| {
+                let time_a = fs::metadata(a).unwrap().modified().unwrap();
+                let time_b = fs::metadata(b).unwrap().modified().unwrap();
+                time_a.cmp(&time_b)
+            });
+
+            // 删除多余的（最旧的）文件
+            let files_to_remove = files.len() - max_files;
+            for i in 0..files_to_remove {
+                if let Err(e) = fs::remove_file(&files[i]) {
+                    warn!("删除旧的CPI日志文件失败 {:?}: {}", files[i], e);
+                } else {
+                    debug!("删除旧的CPI日志文件: {:?}", files[i]);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env::set_var(
@@ -545,6 +629,9 @@ async fn main() -> anyhow::Result<()> {
             log_to_file: false,
             log_file_path: "".to_string(),
             enable_cache: true,
+            cpi_log_json: true,
+            cpi_log_json_dir: "logs/cpi_json".to_string(),
+            cpi_log_json_max_files: 30,
         }
     });
     
@@ -569,6 +656,11 @@ async fn main() -> anyhow::Result<()> {
     log::debug!("  - 账户监控: {}", features.account_monitoring);
     info!("  - 记录到文件: {}", features.log_to_file);
     info!("  - 启用缓存: {}", features.enable_cache);
+    info!("  - CPI日志JSON: {}", features.cpi_log_json);
+    if features.cpi_log_json {
+        info!("  - CPI日志JSON目录: {}", features.cpi_log_json_dir);
+        info!("  - 最大文件数: {}", features.cpi_log_json_max_files);
+    }
     
     if pump_idl.is_some() {
         log::debug!("已加载 PumpFun IDL 文件");
@@ -585,6 +677,15 @@ async fn main() -> anyhow::Result<()> {
         if !log_dir.exists() {
             fs::create_dir_all(log_dir)?;
             info!("创建日志目录: {:?}", log_dir);
+        }
+    }
+    
+    // 创建CPI日志JSON目录（如果启用）
+    if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
+        let cpi_log_dir = std::path::Path::new(&features.cpi_log_json_dir);
+        if !cpi_log_dir.exists() {
+            fs::create_dir_all(cpi_log_dir)?;
+            info!("创建CPI日志JSON目录: {:?}", cpi_log_dir);
         }
     }
     
@@ -877,6 +978,52 @@ async fn geyser_subscribe(
                                                                                 cache_ref.cache_buy_transaction(&signature, log_message.clone(), Some(&mint_address));
                                                                             }
                                                                             
+                                                                            // 保存到CPI日志JSON文件
+                                                                            if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
+                                                                                // 尝试提取虚拟储备和曲线账户信息
+                                                                                let mut vt: Option<u64> = None;
+                                                                                let mut vs: Option<u64> = None;
+                                                                                let mut price: Option<f64> = None;
+                                                                                let mut curve_account: Option<String> = None;
+                                                                                
+                                                                                // 计算曲线账户
+                                                                                if let Some(curve_acc) = calculate_curve_account_from_mint(&mint_address) {
+                                                                                    curve_account = Some(curve_acc.clone());
+                                                                                    
+                                                                                    // 如果有缓存，尝试获取曲线账户数据并提取储备信息
+                                                                                    if let Some(cache_ref) = &cache {
+                                                                                        if let Some(curve_data) = cache_ref.get_account_data(&curve_acc) {
+                                                                                            if let Some((token_reserves, sol_reserves)) = extract_reserves_from_account_data(&curve_data) {
+                                                                                                vt = Some(token_reserves);
+                                                                                                vs = Some(sol_reserves);
+                                                                                                price = Some(calculate_price(token_reserves, sol_reserves));
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                
+                                                                                let cpi_log = CpiLogEntry {
+                                                                                    transaction_type: "Buy".to_string(),
+                                                                                    mint: mint_address,
+                                                                                    token_amount: buy_args.amount,
+                                                                                    sol_amount: buy_args.max_sol_cost as f64 / 1_000_000_000.0,
+                                                                                    time: formatted_time.clone(),
+                                                                                    signature: signature.clone(),
+                                                                                    signer: signer_address,
+                                                                                    price,
+                                                                                    virtual_token_reserves: vt,
+                                                                                    virtual_sol_reserves: vs,
+                                                                                    curve_account,
+                                                                                    creator: None,
+                                                                                    creator_fee_basis_points: None,
+                                                                                    creator_fee: None,
+                                                                                };
+                                                                                
+                                                                                if let Err(e) = save_cpi_log_to_json(cpi_log, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                    warn!("保存CPI日志到JSON文件失败: {}", e);
+                                                                                }
+                                                                            }
+                                                                            
                                                                             if is_monitored_address_involved {
                                                                                 info!("{}", log_message);
                                                                                 
@@ -921,6 +1068,52 @@ async fn geyser_subscribe(
                                                                             // 如果启用缓存，将Sell交易缓存起来
                                                                             if let Some(cache_ref) = &cache {
                                                                                 cache_ref.cache_sell_transaction(&signature, log_message.clone(), Some(&mint_address));
+                                                                            }
+                                                                            
+                                                                            // 保存到CPI日志JSON文件
+                                                                            if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
+                                                                                // 尝试提取虚拟储备和曲线账户信息
+                                                                                let mut vt: Option<u64> = None;
+                                                                                let mut vs: Option<u64> = None;
+                                                                                let mut price: Option<f64> = None;
+                                                                                let mut curve_account: Option<String> = None;
+                                                                                
+                                                                                // 计算曲线账户
+                                                                                if let Some(curve_acc) = calculate_curve_account_from_mint(&mint_address) {
+                                                                                    curve_account = Some(curve_acc.clone());
+                                                                                    
+                                                                                    // 如果有缓存，尝试获取曲线账户数据并提取储备信息
+                                                                                    if let Some(cache_ref) = &cache {
+                                                                                        if let Some(curve_data) = cache_ref.get_account_data(&curve_acc) {
+                                                                                            if let Some((token_reserves, sol_reserves)) = extract_reserves_from_account_data(&curve_data) {
+                                                                                                vt = Some(token_reserves);
+                                                                                                vs = Some(sol_reserves);
+                                                                                                price = Some(calculate_price(token_reserves, sol_reserves));
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                
+                                                                                let cpi_log = CpiLogEntry {
+                                                                                    transaction_type: "Sell".to_string(),
+                                                                                    mint: mint_address,
+                                                                                    token_amount: sell_args.amount,
+                                                                                    sol_amount: sell_args.min_sol_output as f64 / 1_000_000_000.0,
+                                                                                    time: formatted_time.clone(),
+                                                                                    signature: signature.clone(),
+                                                                                    signer: signer_address,
+                                                                                    price,
+                                                                                    virtual_token_reserves: vt,
+                                                                                    virtual_sol_reserves: vs,
+                                                                                    curve_account,
+                                                                                    creator: None,
+                                                                                    creator_fee_basis_points: None,
+                                                                                    creator_fee: None,
+                                                                                };
+                                                                                
+                                                                                if let Err(e) = save_cpi_log_to_json(cpi_log, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                    warn!("保存CPI日志到JSON文件失败: {}", e);
+                                                                                }
                                                                             }
                                                                             
                                                                             if is_monitored_address_involved {
@@ -1395,6 +1588,32 @@ fn calculate_curve_account_from_mint(mint: &str) -> Option<String> {
         let curve_account = derived_pubkey.to_string();
         debug!("[PDA] 从Mint({})计算出曲线账户({})", mint, curve_account);
         return Some(curve_account);
+    }
+    
+    None
+}
+
+/// 从账户数据中提取creator信息
+fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
+    if account_data_str.contains("BondingCurve") {
+        // 查找creator行
+        let creator_line = account_data_str.lines()
+            .find(|line| line.trim().contains("CREATOR:"));
+        
+        if let Some(line) = creator_line {
+            // 提取creator地址
+            let creator_str = line.trim().split(':').last()?.trim();
+            
+            if !creator_str.is_empty() {
+                debug!("[提取] 成功提取创作者地址: {}", creator_str);
+                return Some(creator_str.to_string());
+            } else {
+                debug!("[提取] 创作者地址为空");
+            }
+        } else {
+            // 兼容旧格式：有些数据可能没有明确标记CREATOR字段
+            debug!("[提取] 账户数据中未找到创作者字段");
+        }
     }
     
     None

@@ -3,7 +3,7 @@
 # gRPC 端点地址
 grpc_endpoint = "https://solana-yellowstone-grpc.publicnode.com:443"
 # Redis 配置
-redis_url = "redis://redis:6379/"
+redis_url = "redis://127.0.0.1:6379/"
  
 # 要监听的 Solana 地址列表
 monitored_addresses = [
@@ -35,7 +35,13 @@ enable_cache = true
 # 是否记录交易到文件
 log_to_file = false
 # 日志文件路径
-log_file_path = "logs/transactions.log" 
+log_file_path = "logs/transactions.log"
+# 是否将CPI日志保存为JSON文件
+cpi_log_json = true
+# CPI日志JSON文件保存目录
+cpi_log_json_dir = "logs/cpi_json"
+# 保存的最大文件数量
+cpi_log_json_max_files = 30
 
 # Redis 配置 # This line will be effectively removed by moving redis_url up
 # redis_url = "redis://127.0.0.1/" # This line will be effectively removed by moving redis_url up 
