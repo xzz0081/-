@@ -14,7 +14,7 @@ monitored_addresses = [
 pump_program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
 # PumpFun IDL 文件路径
-pump_idl_path = "idls/pump_0.1.0.json"
+pump_idl_path = "idls/pump.json"
 token_idl_path = "idls/token_program_idl.json"
 
 # IDL 文件路径（可选）

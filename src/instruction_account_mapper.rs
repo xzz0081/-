@@ -12,10 +12,14 @@ struct IdlInstruction {
 #[derive(Deserialize, Clone)]
 struct IdlAccount {
     name: String,
-    #[serde(rename = "isMut")]
+    #[serde(rename = "isMut", default)]
     is_mut: bool,
-    #[serde(rename = "isSigner")]
+    #[serde(rename = "isSigner", default)]
     is_signer: bool,
+    #[serde(rename = "writable", default)]
+    writable: bool,
+    #[serde(rename = "signer", default)]
+    signer: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -60,8 +64,8 @@ impl<'info> InstructionAccountMapper<'info> for Idl {
                 let account_info = &instruction.accounts[i];
                 AccountMetadata {
                     pubkey: account.pubkey,
-                    is_writable: account_info.is_mut,
-                    is_signer: account_info.is_signer,
+                    is_writable: if account_info.is_mut { true } else { account_info.writable },
+                    is_signer: if account_info.is_signer { true } else { account_info.signer },
                     name: account_info.name.clone(),
                 }
             })

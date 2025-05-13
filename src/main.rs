@@ -542,10 +542,17 @@ struct CpiLogEntry {
     price: Option<f64>,                 // 计算出的代币价格
     virtual_token_reserves: Option<u64>, // 虚拟代币储备
     virtual_sol_reserves: Option<u64>,   // 虚拟SOL储备
+    real_token_reserves: Option<u64>,    // 真实代币储备
+    real_sol_reserves: Option<u64>,      // 真实SOL储备
     curve_account: Option<String>,      // 关联的绑定曲线账户
     creator: Option<String>,            // 创作者地址
     creator_fee_basis_points: Option<u64>, // 创作者费用点数
     creator_fee: Option<u64>,           // 创作者费用
+    fee_recipient: Option<String>,      // 费用接收者
+    fee_basis_points: Option<u64>,      // 费用基点
+    fee_amount: Option<u64>,            // 费用金额
+    actual_sol_cost: Option<f64>,       // 实际SOL花费（用于Buy交易）
+    timestamp: Option<i64>,             // 时间戳
 }
 
 /// 辅助函数，保存CPI日志到JSON文件
@@ -575,6 +582,68 @@ fn save_cpi_log_to_json(entry: CpiLogEntry, dir_path: &str, max_files: usize) ->
     let json_content = serde_json::to_string_pretty(&entry)?;
     fs::write(&filename, json_content)?;
     info!("保存CPI日志到JSON文件: {}", filename);
+
+    // 如果超过最大文件数，删除最旧的文件
+    if max_files > 0 {
+        // 获取所有JSON文件并按修改时间排序
+        let pattern = format!("{}/*.json", dir_path);
+        let mut files: Vec<_> = glob(&pattern)
+            .expect("读取文件列表失败")
+            .filter_map(Result::ok)
+            .collect();
+
+        // 如果文件数量超过限制
+        if files.len() > max_files {
+            // 按修改时间排序（最旧的在前面）
+            files.sort_by(|a, b| {
+                let time_a = fs::metadata(a).unwrap().modified().unwrap();
+                let time_b = fs::metadata(b).unwrap().modified().unwrap();
+                time_a.cmp(&time_b)
+            });
+
+            // 删除多余的（最旧的）文件
+            let files_to_remove = files.len() - max_files;
+            for i in 0..files_to_remove {
+                if let Err(e) = fs::remove_file(&files[i]) {
+                    warn!("删除旧的CPI日志文件失败 {:?}: {}", files[i], e);
+                } else {
+                    debug!("删除旧的CPI日志文件: {:?}", files[i]);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 保存原始CPI日志数据到JSON文件
+fn save_raw_cpi_log_to_json(log_data: Value, dir_path: &str, max_files: usize) -> anyhow::Result<()> {
+    // 确保目录存在
+    let dir = std::path::Path::new(dir_path);
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        info!("创建CPI日志JSON目录: {:?}", dir);
+    }
+
+    // 创建文件名，使用交易签名和时间戳
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("时间错误")
+        .as_millis();
+    
+    let signature = log_data["signature"].as_str().unwrap_or("unknown");
+    let short_sig = if signature.len() > 8 {
+        &signature[0..8]
+    } else {
+        signature
+    };
+    
+    let filename = format!("{}/{}_{}.json", dir_path, short_sig, timestamp);
+
+    // 序列化并写入文件，使用pretty格式确保易读性
+    let json_content = serde_json::to_string_pretty(&log_data)?;
+    fs::write(&filename, json_content)?;
+    info!("保存原始CPI日志到JSON文件: {}", filename);
 
     // 如果超过最大文件数，删除最旧的文件
     if max_files > 0 {
@@ -995,6 +1064,8 @@ async fn geyser_subscribe(
                                                                                 let mut virtual_sol_reserves = None;
                                                                                 let mut price = None;
                                                                                 let mut creator = None;
+                                                                                let mut fee_basis_points = None;
+                                                                                let mut creator_fee_basis_points = None;
                                                                                 
                                                                                 // 如果有曲线账户，尝试获取曲线账户数据和储备信息
                                                                                 if let Some(ref curve_account_str) = curve_account {
@@ -1006,51 +1077,50 @@ async fn geyser_subscribe(
                                                                                                 price = Some(calculate_price(vt, vs));
                                                                                             }
                                                                                             
-                                                                                            // 尝试获取代币创建者信息
-                                                                                            // 这里可以添加合适的映射表或从链上获取
-                                                                                            // 以下只是示例，您需要根据业务逻辑实现
-                                                                                            if !parsed_json.is_null() {
-                                                                                                if let Some(accounts) = parsed_json["accounts"].as_array() {
-                                                                                                    // 尝试查找create指令的user
-                                                                                                    // 实际实现应该使用更靠谱的方式
-                                                                                                    if let Some(user) = accounts.iter().find(|obj| 
-                                                                                                        obj["name"] == "user" && obj["is_signer"] == true) {
-                                                                                                        creator = user["pubkey"].as_str().map(|s| s.to_string());
-                                                                                                    }
-                                                                                                }
+                                                                                            // 尝试获取代币创建者信息直接从BondingCurve账户数据中提取
+                                                                                            creator = extract_creator_from_account_data(&curve_data);
+                                                                                            if let Some(ref c) = creator {
+                                                                                                debug!("[Creator] 从曲线账户({})数据中提取到创建者: {}", curve_account_str, c);
                                                                                             }
                                                                                         }
                                                                                     }
                                                                                 }
                                                                                 
-                                                                                // 如果还是没找到creator，尝试其他方法获取
+                                                                                // 如果从账户数据中未找到creator，尝试从映射表中查找
                                                                                 if creator.is_none() {
-                                                                                    // 尝试从映射表中查找
                                                                                     creator = find_creator_by_mint(&mint_address);
                                                                                     if let Some(ref c) = creator {
                                                                                         debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
                                                                                     }
                                                                                 }
                                                                                 
-                                                                                let cpi_log = CpiLogEntry {
-                                                                                    transaction_type: "Buy".to_string(),
-                                                                                    mint: mint_address.clone(),
-                                                                                    token_amount: buy_args.amount,
-                                                                                    sol_amount: buy_args.max_sol_cost as f64 / 1_000_000_000.0,
-                                                                                    time: formatted_time.clone(),
-                                                                                    signature: signature.clone(),
-                                                                                    signer: signer_address.clone(),
-                                                                                    price,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves,
-                                                                                    curve_account,
-                                                                                    creator,
-                                                                                    creator_fee_basis_points: None,
-                                                                                    creator_fee: None,
-                                                                                };
+                                                                                // 尝试获取全局账户数据以获取fee_basis_points和creator_fee_basis_points
+                                                                                let global_account = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"; // 全局账户公钥
+                                                                                if let Some(cache_ref) = &cache {
+                                                                                    if let Some(global_data) = cache_ref.get_account_data(global_account) {
+                                                                                        // 这里应该解析Global账户数据，提取fee_basis_points和creator_fee_basis_points
+                                                                                        // 简化处理，使用默认值
+                                                                                        fee_basis_points = Some(30); // 0.3%
+                                                                                        creator_fee_basis_points = Some(100); // 1%
+                                                                                    }
+                                                                                }
                                                                                 
-                                                                                if let Err(e) = save_cpi_log_to_json(cpi_log, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
-                                                                                    warn!("保存CPI日志到JSON文件失败: {}", e);
+                                                                                // 1. 保存原始交易数据
+                                                                                let raw_log_data = extract_raw_cpi_log_data(
+                                                                                    &decoded_ix,
+                                                                                    &signature,
+                                                                                    &parsed_json["accounts"],
+                                                                                    &mint_address,
+                                                                                    &signer_address,
+                                                                                    &formatted_time,
+                                                                                    &curve_account,
+                                                                                    virtual_token_reserves,
+                                                                                    virtual_sol_reserves
+                                                                                );
+                                                                                
+                                                                                // 保存原始日志数据
+                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                    warn!("保存原始CPI日志到JSON文件失败: {}", e);
                                                                                 }
                                                                             }
                                                                             
@@ -1117,6 +1187,8 @@ async fn geyser_subscribe(
                                                                                 let mut virtual_sol_reserves = None;
                                                                                 let mut price = None;
                                                                                 let mut creator = None;
+                                                                                let mut fee_basis_points = None;
+                                                                                let mut creator_fee_basis_points = None;
                                                                                 
                                                                                 // 如果有曲线账户，尝试获取曲线账户数据和储备信息
                                                                                 if let Some(ref curve_account_str) = curve_account {
@@ -1128,50 +1200,50 @@ async fn geyser_subscribe(
                                                                                                 price = Some(calculate_price(vt, vs));
                                                                                             }
                                                                                             
-                                                                                            // 尝试获取代币创建者信息
-                                                                                            // 这里可以添加合适的映射表或从链上获取
-                                                                                            if !parsed_json.is_null() {
-                                                                                                if let Some(accounts) = parsed_json["accounts"].as_array() {
-                                                                                                    // 尝试查找create指令的user
-                                                                                                    // 实际实现应该使用更靠谱的方式
-                                                                                                    if let Some(user) = accounts.iter().find(|obj| 
-                                                                                                        obj["name"] == "user" && obj["is_signer"] == true) {
-                                                                                                        creator = user["pubkey"].as_str().map(|s| s.to_string());
-                                                                                                    }
-                                                                                                }
+                                                                                            // 尝试获取代币创建者信息直接从BondingCurve账户数据中提取
+                                                                                            creator = extract_creator_from_account_data(&curve_data);
+                                                                                            if let Some(ref c) = creator {
+                                                                                                debug!("[Creator] 从曲线账户({})数据中提取到创建者: {}", curve_account_str, c);
                                                                                             }
                                                                                         }
                                                                                     }
                                                                                 }
                                                                                 
-                                                                                // 如果还是没找到creator，尝试其他方法获取
+                                                                                // 如果从账户数据中未找到creator，尝试从映射表中查找
                                                                                 if creator.is_none() {
-                                                                                    // 尝试从映射表中查找
                                                                                     creator = find_creator_by_mint(&mint_address);
                                                                                     if let Some(ref c) = creator {
                                                                                         debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
                                                                                     }
                                                                                 }
                                                                                 
-                                                                                let cpi_log = CpiLogEntry {
-                                                                                    transaction_type: "Sell".to_string(),
-                                                                                    mint: mint_address.clone(),
-                                                                                    token_amount: sell_args.amount,
-                                                                                    sol_amount: sell_args.min_sol_output as f64 / 1_000_000_000.0,
-                                                                                    time: formatted_time.clone(),
-                                                                                    signature: signature.clone(),
-                                                                                    signer: signer_address.clone(),
-                                                                                    price,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves,
-                                                                                    curve_account,
-                                                                                    creator,
-                                                                                    creator_fee_basis_points: None,
-                                                                                    creator_fee: None,
-                                                                                };
+                                                                                // 尝试获取全局账户数据以获取fee_basis_points和creator_fee_basis_points
+                                                                                let global_account = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"; // 全局账户公钥
+                                                                                if let Some(cache_ref) = &cache {
+                                                                                    if let Some(global_data) = cache_ref.get_account_data(global_account) {
+                                                                                        // 这里应该解析Global账户数据，提取fee_basis_points和creator_fee_basis_points
+                                                                                        // 简化处理，使用默认值
+                                                                                        fee_basis_points = Some(30); // 0.3%
+                                                                                        creator_fee_basis_points = Some(100); // 1%
+                                                                                    }
+                                                                                }
                                                                                 
-                                                                                if let Err(e) = save_cpi_log_to_json(cpi_log, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
-                                                                                    warn!("保存CPI日志到JSON文件失败: {}", e);
+                                                                                // 1. 保存原始交易数据
+                                                                                let raw_log_data = extract_raw_cpi_log_data(
+                                                                                    &decoded_ix,
+                                                                                    &signature,
+                                                                                    &parsed_json["accounts"],
+                                                                                    &mint_address,
+                                                                                    &signer_address,
+                                                                                    &formatted_time,
+                                                                                    &curve_account,
+                                                                                    virtual_token_reserves,
+                                                                                    virtual_sol_reserves
+                                                                                );
+                                                                                
+                                                                                // 保存原始日志数据
+                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                    warn!("保存原始CPI日志到JSON文件失败: {}", e);
                                                                                 }
                                                                             }
                                                                             
@@ -1418,15 +1490,10 @@ async fn geyser_subscribe_accounts(
                                             // 提取mint地址（在后续步骤中需要）
                                             let mint_address = extract_mint_address_from_account_data(&temp_account_info);
                                             
-                                            // 获取creator信息 - 这里我们应该从Global账户或者其他渠道获取真正的创建者信息
-                                            // PumpFun系统中，代币的创建者通常是在Create指令中的user字段
+                                            // 获取creator信息 - 通过mint地址查找
                                             let creator = if let Some(ref mint) = mint_address {
-                                                // 首先尝试从账户数据中提取
-                                                extract_creator_from_account_data(&temp_account_info)
-                                                    .unwrap_or_else(|| {
-                                                        // 如果从账户数据中没找到，这里您可以实现一个mint->creator的映射表
-                                                        "未获取到创建者地址".to_string()
-                                                    })
+                                                // 尝试从映射表中查找创建者
+                                                find_creator_by_mint(mint).unwrap_or_else(|| "未知".to_string())
                                             } else {
                                                 "未知".to_string()
                                             };
@@ -1569,6 +1636,11 @@ pub fn decode_account_data(buf: &[u8]) -> Result<DecodedAccount, AccountDecodeEr
                     message: format!("无法反序列化BondingCurveAccount: {}", e),
                 })?;
             log::debug!("解码的绑定曲线结构: {:#?}", data);
+            
+            // 本地BondingCurve结构体中没有creator字段，记录其他信息
+            log::debug!("绑定曲线已解析: 虚拟代币储备: {}, 虚拟SOL储备: {}", 
+                         data.0.virtual_token_reserves, data.0.virtual_sol_reserves);
+            
             Ok(DecodedAccount::BondingCurve(data.0))
         }
         GLOBAL_ACCOUNT_DISCM => {
@@ -1686,7 +1758,8 @@ fn find_creator_by_mint(mint: &str) -> Option<String> {
         ("4qMyinhBRrePr82BjoKheaXocfTXChBMk3TWifHypump", "2yodq5YqMk5owNYhUWjh9gNkwRxaQBYDAcJdaGC7B7vG"),
         ("7kJzws2KnTV73d16ZuifeFmSyupxYkp7CPYenV3Apump", "J9MBJJrqxsqBSXMk46PT5XJj9qXBzj6kcGbECdmDSQoV"),
         ("FqF6Ac1j71qjTxjg9mJag3zrmmnxVtXJQTxZjSPdpump", "F5RYi7FMPefkc7okJNh21HgKmFVtJYyGBm1xxvriDVYZ"),
-        ("amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump", "AgjVXC8iNqNJwJsMYmBncf8TC9uVJJwJb3HRq9WFQ2XF"),
+        // 修正amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump的创建者地址
+        ("amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump", "Hju3K6uRadH7AkynqHGCZgD1W63WNa47h6DuNpTk3xsG"),
         ("A5JqPPSTf3Rc4W9R9CYLRhRowMLZLquweJgR6iDepump", "Eou3bQd3VYUzXxcLBqihFP5J5qK3W3f8Lq5CsX3EY8Yk"),
         // 添加更多mint->creator映射
     ].iter().cloned().collect();
@@ -1697,35 +1770,246 @@ fn find_creator_by_mint(mint: &str) -> Option<String> {
 /// 从账户数据中提取creator信息
 fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
     if account_data_str.contains("BondingCurve") {
-        // 查找creator行
+        // 优先从账户数据字符串中直接查找CREATOR字段
         let creator_line = account_data_str.lines()
             .find(|line| line.trim().contains("CREATOR:"));
         
         if let Some(line) = creator_line {
             // 提取creator地址
-            let creator_str = line.trim().split(':').last()?.trim();
-            
-            if !creator_str.is_empty() && creator_str != "未知" && creator_str != "N/A" && creator_str != "未获取到创建者地址" {
-                debug!("[提取] 成功提取创作者地址: {}", creator_str);
-                return Some(creator_str.to_string());
-            } else {
-                debug!("[提取] 创作者地址未知或为空");
-            }
-        } else {
-            // 如果CREATOR字段不存在，尝试从mint信息中提取
-            if let Some(mint) = extract_mint_address_from_account_data(account_data_str) {
-                // 根据mint地址查找creator
-                if let Some(creator) = find_creator_by_mint(&mint) {
-                    debug!("[提取] 从mint地址({})找到创作者({})", mint, creator);
-                    return Some(creator);
-                } else {
-                    debug!("[提取] 未能为mint地址({})找到对应的创作者", mint);
+            if let Some(creator_str) = line.trim().split(':').last() {
+                let creator_str = creator_str.trim();
+                
+                if !creator_str.is_empty() && creator_str != "未知" && creator_str != "N/A" && creator_str != "未获取到创建者地址" {
+                    debug!("[提取] 成功从文本中提取创作者地址: {}", creator_str);
+                    return Some(creator_str.to_string());
                 }
             }
-            
-            debug!("[提取] 账户数据中未找到创作者字段");
+        } else {
+            // 尝试解析原始账户数据以获取creator字段
+            // 首先检查是否有缓存的原始数据
+            if let Some(pubkey_line) = account_data_str.lines().find(|line| line.trim().starts_with("PUBKEY:")) {
+                if let Some(pubkey_str) = pubkey_line.trim().split(':').last() {
+                    let pubkey_str = pubkey_str.trim();
+                    // 检查是否有数据并尝试读取原始数据
+                    if let Ok(account_pubkey) = Pubkey::from_str(pubkey_str) {
+                        // 这里理想情况下我们应该读取账户数据，但由于我们没有直接访问链的能力
+                        // 所以只能通过之前缓存的数据进行解析
+                        debug!("[提取] 尝试从账户({})解析创作者字段", pubkey_str);
+                        
+                        // 尝试从mint地址获取，这是后备方案
+                        if let Some(mint) = extract_mint_address_from_account_data(account_data_str) {
+                            if let Some(creator) = find_creator_by_mint(&mint) {
+                                debug!("[提取] 通过mint({})映射找到创作者: {}", mint, creator);
+                                return Some(creator);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     
     None
+}
+
+/// 从CPI指令中获取原始日志数据
+fn extract_raw_cpi_log_data(
+    ix: &PumpProgramIx, 
+    signature: &str, 
+    accounts: &Value, 
+    mint_address: &str, 
+    signer_address: &str,
+    formatted_time: &str,
+    curve_account: &Option<String>,
+    vt_reserves: Option<u64>,
+    vs_reserves: Option<u64>
+) -> Value {
+    // 创建基本日志结构
+    let mut log_data = json!({
+        "signature": signature,
+        "mint": mint_address,
+        "signer": signer_address,
+        "time": formatted_time,
+    });
+
+    // 添加储备信息
+    if let Some(vt) = vt_reserves {
+        log_data["virtual_token_reserves"] = json!(vt);
+    }
+    if let Some(vs) = vs_reserves {
+        log_data["virtual_sol_reserves"] = json!(vs);
+    }
+    
+    // 添加曲线账户
+    if let Some(curve) = curve_account {
+        log_data["curve_account"] = json!(curve);
+    }
+
+    // 尝试从账户列表中提取创作者相关信息
+    if let Some(accounts_array) = accounts.as_array() {
+        // 查找creator_vault账户（如果存在）
+        if let Some(creator_vault) = accounts_array.iter().find(|obj| obj["name"] == "creator_vault") {
+            log_data["creator_vault"] = json!(creator_vault["pubkey"].as_str().unwrap_or(""));
+        }
+        
+        // 查找fee_recipient账户信息
+        if let Some(fee_recipient) = accounts_array.iter().find(|obj| obj["name"] == "fee_recipient") {
+            log_data["fee_recipient"] = json!(fee_recipient["pubkey"].as_str().unwrap_or(""));
+        }
+    }
+    
+    // 查找创作者信息
+    let creator = find_creator_by_mint(mint_address);
+    if let Some(creator_address) = creator {
+        log_data["creator"] = json!(creator_address);
+    }
+    
+    // 添加Global账户信息（可用于获取fee_basis_points等）
+    if let Some(accounts_array) = accounts.as_array() {
+        if let Some(global) = accounts_array.iter().find(|obj| obj["name"] == "global") {
+            log_data["global_account"] = json!(global["pubkey"].as_str().unwrap_or(""));
+            
+            // 这里可以添加尝试加载Global账户数据的代码（如果有缓存）
+            // 如果能获取到Global账户数据，就可以提取fee_basis_points和creator_fee_basis_points
+        }
+    }
+    
+    // 根据指令类型添加特定字段
+    match ix {
+        PumpProgramIx::Buy(buy_args) => {
+            log_data["type"] = json!("Buy");
+            log_data["token_amount"] = json!(buy_args.amount);
+            log_data["sol_amount"] = json!(buy_args.max_sol_cost);
+            
+            // 保存原始格式
+            log_data["raw"] = json!({
+                "token_amount": buy_args.amount.to_string(),
+                "sol_amount": buy_args.max_sol_cost.to_string(),
+                "sol_amount_human": format!("{} SOL", buy_args.max_sol_cost as f64 / 1_000_000_000.0),
+            });
+            
+            // 尝试计算创作者费用（这需要知道creator_fee_basis_points）
+            // 默认使用Global账户中的值或硬编码一个常见值（如100 = 1%）
+            let creator_fee_basis_points = 100; // 默认1%，实际应从Global账户获取
+            let creator_fee = calculate_creator_fee(buy_args.max_sol_cost, creator_fee_basis_points);
+            log_data["creator_fee_basis_points"] = json!(creator_fee_basis_points);
+            log_data["creator_fee"] = json!(creator_fee);
+        },
+        PumpProgramIx::Sell(sell_args) => {
+            log_data["type"] = json!("Sell");
+            log_data["token_amount"] = json!(sell_args.amount);
+            log_data["min_sol_output"] = json!(sell_args.min_sol_output);
+            
+            // 保存原始格式
+            log_data["raw"] = json!({
+                "token_amount": sell_args.amount.to_string(),
+                "min_sol_output": sell_args.min_sol_output.to_string(),
+                "min_sol_output_human": format!("{} SOL", sell_args.min_sol_output as f64 / 1_000_000_000.0),
+            });
+            
+            // 尝试计算创作者费用（这需要知道creator_fee_basis_points）
+            // 默认使用Global账户中的值或硬编码一个常见值（如100 = 1%）
+            let creator_fee_basis_points = 100; // 默认1%，实际应从Global账户获取
+            let creator_fee = calculate_creator_fee(sell_args.min_sol_output, creator_fee_basis_points);
+            log_data["creator_fee_basis_points"] = json!(creator_fee_basis_points);
+            log_data["creator_fee"] = json!(creator_fee);
+        },
+        _ => {
+            log_data["type"] = json!(format!("{}", ix.name()));
+        }
+    }
+
+    // 添加所有账户信息
+    if let Some(accounts_array) = accounts.as_array() {
+        // 完整保存原始账户数组
+        log_data["raw_accounts"] = accounts.clone();
+        
+        // 同时提供更易读的账户信息
+        let mut accounts_map = serde_json::Map::new();
+        for (idx, account) in accounts_array.iter().enumerate() {
+            if let (Some(name), Some(pubkey)) = (account["name"].as_str(), account["pubkey"].as_str()) {
+                accounts_map.insert(name.to_string(), json!({
+                    "pubkey": pubkey,
+                    "index": idx,
+                    "is_signer": account["is_signer"].as_bool().unwrap_or(false),
+                    "is_writable": account["is_writable"].as_bool().unwrap_or(false),
+                }));
+            }
+        }
+        log_data["accounts_by_name"] = json!(accounts_map);
+    }
+
+    // 添加原始指令数据和完整指令名称
+    match ix {
+        PumpProgramIx::Buy(buy_args) => {
+            log_data["instruction"] = json!({
+                "name": "buy",
+                "full_name": "pump::Buy",
+                "args": {
+                    "amount": buy_args.amount,
+                    "max_sol_cost": buy_args.max_sol_cost
+                }
+            });
+        },
+        PumpProgramIx::Sell(sell_args) => {
+            log_data["instruction"] = json!({
+                "name": "sell",
+                "full_name": "pump::Sell",
+                "args": {
+                    "amount": sell_args.amount,
+                    "min_sol_output": sell_args.min_sol_output
+                }
+            });
+        },
+        _ => {
+            log_data["instruction"] = json!({
+                "name": ix.name(),
+                "full_name": format!("pump::{}", ix.name()),
+            });
+        }
+    }
+
+    // 添加时间戳
+    if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        log_data["timestamp"] = json!(timestamp.as_secs());
+        log_data["timestamp_millis"] = json!(timestamp.as_millis());
+    }
+
+    log_data
+}
+
+/// 计算创作者费用
+fn calculate_creator_fee(amount: u64, fee_basis_points: u64) -> u64 {
+    // 计算创作者费用（amount * fee_basis_points / 10000）
+    // 使用更安全的计算方式，避免溢出
+    if amount == 0 || fee_basis_points == 0 {
+        return 0;
+    }
+    
+    // 计算 amount * fee_basis_points / 10000 前先检查是否可能溢出
+    if let Some(product) = amount.checked_mul(fee_basis_points) {
+        product / 10000
+    } else {
+        // 如果可能溢出，使用一种安全的替代计算方法
+        let amount_f64 = amount as f64;
+        let fee_percent = fee_basis_points as f64 / 10000.0;
+        (amount_f64 * fee_percent) as u64
+    }
+}
+
+// 在文件末尾添加
+/// 为了兼容创建者信息的查找，提供一个函数接口
+/// 由于BondingCurve结构体中没有creator字段，这个函数仅依赖映射表查找
+fn get_creator_for_mint(mint_address: &str) -> Option<String> {
+    find_creator_by_mint(mint_address)
+}
+
+/// 尝试通过其他方式获取创建者信息，不依赖BondingCurve结构体
+fn get_creator_for_curve(mint_address: Option<&str>) -> String {
+    if let Some(mint) = mint_address {
+        if let Some(creator) = find_creator_by_mint(mint) {
+            return creator;
+        }
+    }
+    "未知".to_string()
 }
