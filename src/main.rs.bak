@@ -980,71 +980,19 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 保存到CPI日志JSON文件
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
-                                                                                // 为修正问题，首先确认parsed_json是在这个作用域可用的
-                                                                                let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
-                                                                                    serde_json::from_str(&json_string).unwrap_or_default()
-                                                                                } else {
-                                                                                    Value::Null
-                                                                                };
-                                                                                
-                                                                                // 计算曲线账户
-                                                                                let curve_account = calculate_curve_account_from_mint(&mint_address);
-                                                                                
-                                                                                // 获取虚拟储备信息
-                                                                                let mut virtual_token_reserves = None;
-                                                                                let mut virtual_sol_reserves = None;
-                                                                                let mut price = None;
-                                                                                let mut creator = None;
-                                                                                
-                                                                                // 如果有曲线账户，尝试获取曲线账户数据和储备信息
-                                                                                if let Some(ref curve_account_str) = curve_account {
-                                                                                    if let Some(cache_ref) = &cache {
-                                                                                        if let Some(curve_data) = cache_ref.get_account_data(curve_account_str) {
-                                                                                            if let Some((vt, vs)) = extract_reserves_from_account_data(&curve_data) {
-                                                                                                virtual_token_reserves = Some(vt);
-                                                                                                virtual_sol_reserves = Some(vs);
-                                                                                                price = Some(calculate_price(vt, vs));
-                                                                                            }
-                                                                                            
-                                                                                            // 尝试获取代币创建者信息
-                                                                                            // 这里可以添加合适的映射表或从链上获取
-                                                                                            // 以下只是示例，您需要根据业务逻辑实现
-                                                                                            if !parsed_json.is_null() {
-                                                                                                if let Some(accounts) = parsed_json["accounts"].as_array() {
-                                                                                                    // 尝试查找create指令的user
-                                                                                                    // 实际实现应该使用更靠谱的方式
-                                                                                                    if let Some(user) = accounts.iter().find(|obj| 
-                                                                                                        obj["name"] == "user" && obj["is_signer"] == true) {
-                                                                                                        creator = user["pubkey"].as_str().map(|s| s.to_string());
-                                                                                                    }
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                                
-                                                                                // 如果还是没找到creator，尝试其他方法获取
-                                                                                if creator.is_none() {
-                                                                                    // 尝试从映射表中查找
-                                                                                    creator = find_creator_by_mint(&mint_address);
-                                                                                    if let Some(ref c) = creator {
-                                                                                        debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
-                                                                                    }
-                                                                                }
-                                                                                
                                                                                 let cpi_log = CpiLogEntry {
                                                                                     transaction_type: "Buy".to_string(),
-                                                                                    mint: mint_address.clone(),
+                                                                                    mint: mint_address,
                                                                                     token_amount: buy_args.amount,
                                                                                     sol_amount: buy_args.max_sol_cost as f64 / 1_000_000_000.0,
                                                                                     time: formatted_time.clone(),
                                                                                     signature: signature.clone(),
-                                                                                    signer: signer_address.clone(),
-                                                                                    price,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves,
-                                                                                    curve_account,
-                                                                                    creator,
+                                                                                    signer: signer_address,
+                                                                                    price: None,
+                                                                                    virtual_token_reserves: None,
+                                                                                    virtual_sol_reserves: None,
+                                                                                    curve_account: None,
+                                                                                    creator: None,
                                                                                     creator_fee_basis_points: None,
                                                                                     creator_fee: None,
                                                                                 };
@@ -1102,70 +1050,19 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 保存到CPI日志JSON文件
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
-                                                                                // 为修正问题，首先确认parsed_json是在这个作用域可用的
-                                                                                let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
-                                                                                    serde_json::from_str(&json_string).unwrap_or_default()
-                                                                                } else {
-                                                                                    Value::Null
-                                                                                };
-                                                                                
-                                                                                // 计算曲线账户
-                                                                                let curve_account = calculate_curve_account_from_mint(&mint_address);
-                                                                                
-                                                                                // 获取虚拟储备信息
-                                                                                let mut virtual_token_reserves = None;
-                                                                                let mut virtual_sol_reserves = None;
-                                                                                let mut price = None;
-                                                                                let mut creator = None;
-                                                                                
-                                                                                // 如果有曲线账户，尝试获取曲线账户数据和储备信息
-                                                                                if let Some(ref curve_account_str) = curve_account {
-                                                                                    if let Some(cache_ref) = &cache {
-                                                                                        if let Some(curve_data) = cache_ref.get_account_data(curve_account_str) {
-                                                                                            if let Some((vt, vs)) = extract_reserves_from_account_data(&curve_data) {
-                                                                                                virtual_token_reserves = Some(vt);
-                                                                                                virtual_sol_reserves = Some(vs);
-                                                                                                price = Some(calculate_price(vt, vs));
-                                                                                            }
-                                                                                            
-                                                                                            // 尝试获取代币创建者信息
-                                                                                            // 这里可以添加合适的映射表或从链上获取
-                                                                                            if !parsed_json.is_null() {
-                                                                                                if let Some(accounts) = parsed_json["accounts"].as_array() {
-                                                                                                    // 尝试查找create指令的user
-                                                                                                    // 实际实现应该使用更靠谱的方式
-                                                                                                    if let Some(user) = accounts.iter().find(|obj| 
-                                                                                                        obj["name"] == "user" && obj["is_signer"] == true) {
-                                                                                                        creator = user["pubkey"].as_str().map(|s| s.to_string());
-                                                                                                    }
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                                
-                                                                                // 如果还是没找到creator，尝试其他方法获取
-                                                                                if creator.is_none() {
-                                                                                    // 尝试从映射表中查找
-                                                                                    creator = find_creator_by_mint(&mint_address);
-                                                                                    if let Some(ref c) = creator {
-                                                                                        debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
-                                                                                    }
-                                                                                }
-                                                                                
                                                                                 let cpi_log = CpiLogEntry {
                                                                                     transaction_type: "Sell".to_string(),
-                                                                                    mint: mint_address.clone(),
+                                                                                    mint: mint_address,
                                                                                     token_amount: sell_args.amount,
                                                                                     sol_amount: sell_args.min_sol_output as f64 / 1_000_000_000.0,
                                                                                     time: formatted_time.clone(),
                                                                                     signature: signature.clone(),
-                                                                                    signer: signer_address.clone(),
-                                                                                    price,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves,
-                                                                                    curve_account,
-                                                                                    creator,
+                                                                                    signer: signer_address,
+                                                                                    price: None,
+                                                                                    virtual_token_reserves: None,
+                                                                                    virtual_sol_reserves: None,
+                                                                                    curve_account: None,
+                                                                                    creator: None,
                                                                                     creator_fee_basis_points: None,
                                                                                     creator_fee: None,
                                                                                 };
@@ -1393,8 +1290,7 @@ async fn geyser_subscribe_accounts(
                                             // 格式化为ISO 8601格式，显示+08:00时区信息
                                             let formatted_time = beijing_time.format("%Y-%m-%dT%H:%M:%S%.3f+08:00").to_string();
                                             
-                                            // 构造账户信息字符串
-                                            let mut account_info_str = format!("
+                                            format!("
                                             ACCOUNT TYPE: BondingCurve
                                             PUBKEY: {}
                                             VIRTUAL TOKEN RESERVES: {}
@@ -1403,6 +1299,8 @@ async fn geyser_subscribe_accounts(
                                             REAL SOL RESERVES: {}
                                             TOKEN TOTAL SUPPLY: {}
                                             COMPLETE: {}
+                                            CREATOR: {}
+                                            TIME: {}
                                             ",
                                             pubkey_str,
                                             bc.virtual_token_reserves,
@@ -1410,34 +1308,10 @@ async fn geyser_subscribe_accounts(
                                             bc.real_token_reserves,
                                             bc.real_sol_reserves,
                                             bc.token_total_supply,
-                                            bc.complete);
-                                            
-                                            // 先保存一下当前账户信息，用于后面从中提取creator
-                                            let temp_account_info = account_info_str.clone();
-                                            
-                                            // 提取mint地址（在后续步骤中需要）
-                                            let mint_address = extract_mint_address_from_account_data(&temp_account_info);
-                                            
-                                            // 获取creator信息 - 这里我们应该从Global账户或者其他渠道获取真正的创建者信息
-                                            // PumpFun系统中，代币的创建者通常是在Create指令中的user字段
-                                            let creator = if let Some(ref mint) = mint_address {
-                                                // 首先尝试从账户数据中提取
-                                                extract_creator_from_account_data(&temp_account_info)
-                                                    .unwrap_or_else(|| {
-                                                        // 如果从账户数据中没找到，这里您可以实现一个mint->creator的映射表
-                                                        "未获取到创建者地址".to_string()
-                                                    })
-                                            } else {
-                                                "未知".to_string()
-                                            };
-                                            
-                                            // 添加creator信息
-                                            account_info_str.push_str(&format!("CREATOR: {}\n", creator));
-                                            
-                                            // 添加时间信息
-                                            account_info_str.push_str(&format!("TIME: {}\n", formatted_time));
-                                            
-                                            account_info_str
+                                            bc.complete,
+                                            bs58::encode(&bc.creator.to_bytes()).into_string(),
+                                            formatted_time
+                                            )
                                     },
                                     DecodedAccount::Global(global) => {
                                         let timestamp_millis = SystemTime::now()
@@ -1677,23 +1551,6 @@ fn calculate_curve_account_from_mint(mint: &str) -> Option<String> {
     None
 }
 
-/// 从mint地址查找creator（硬编码版本，实际应通过配置文件或数据库读取）
-fn find_creator_by_mint(mint: &str) -> Option<String> {
-    // 硬编码一些映射示例
-    let creator_map: HashMap<&str, &str> = [
-        // 示例数据，请替换为实际数据
-        ("DCLjJRAP4PineCmCabTKRrTVsSaggkmfgBj8AMPapump", "T5SWiQQCACjAMSjTnHEbRjFzxqQyd5xoLvHqFPRqRLw"),
-        ("4qMyinhBRrePr82BjoKheaXocfTXChBMk3TWifHypump", "2yodq5YqMk5owNYhUWjh9gNkwRxaQBYDAcJdaGC7B7vG"),
-        ("7kJzws2KnTV73d16ZuifeFmSyupxYkp7CPYenV3Apump", "J9MBJJrqxsqBSXMk46PT5XJj9qXBzj6kcGbECdmDSQoV"),
-        ("FqF6Ac1j71qjTxjg9mJag3zrmmnxVtXJQTxZjSPdpump", "F5RYi7FMPefkc7okJNh21HgKmFVtJYyGBm1xxvriDVYZ"),
-        ("amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump", "AgjVXC8iNqNJwJsMYmBncf8TC9uVJJwJb3HRq9WFQ2XF"),
-        ("A5JqPPSTf3Rc4W9R9CYLRhRowMLZLquweJgR6iDepump", "Eou3bQd3VYUzXxcLBqihFP5J5qK3W3f8Lq5CsX3EY8Yk"),
-        // 添加更多mint->creator映射
-    ].iter().cloned().collect();
-    
-    creator_map.get(mint).map(|s| s.to_string())
-}
-
 /// 从账户数据中提取creator信息
 fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
     if account_data_str.contains("BondingCurve") {
@@ -1705,24 +1562,14 @@ fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
             // 提取creator地址
             let creator_str = line.trim().split(':').last()?.trim();
             
-            if !creator_str.is_empty() && creator_str != "未知" && creator_str != "N/A" && creator_str != "未获取到创建者地址" {
+            if !creator_str.is_empty() {
                 debug!("[提取] 成功提取创作者地址: {}", creator_str);
                 return Some(creator_str.to_string());
             } else {
-                debug!("[提取] 创作者地址未知或为空");
+                debug!("[提取] 创作者地址为空");
             }
         } else {
-            // 如果CREATOR字段不存在，尝试从mint信息中提取
-            if let Some(mint) = extract_mint_address_from_account_data(account_data_str) {
-                // 根据mint地址查找creator
-                if let Some(creator) = find_creator_by_mint(&mint) {
-                    debug!("[提取] 从mint地址({})找到创作者({})", mint, creator);
-                    return Some(creator);
-                } else {
-                    debug!("[提取] 未能为mint地址({})找到对应的创作者", mint);
-                }
-            }
-            
+            // 兼容旧格式：有些数据可能没有明确标记CREATOR字段
             debug!("[提取] 账户数据中未找到创作者字段");
         }
     }
