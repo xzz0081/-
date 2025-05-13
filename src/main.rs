@@ -1532,10 +1532,15 @@ async fn geyser_subscribe_accounts(
                                             // 提取mint地址（在后续步骤中需要）
                                             let mint_address = extract_mint_address_from_account_data(&temp_account_info);
                                             
-                                            // 获取creator信息 - 通过mint地址查找
+                                            // 获取creator信息 - 优先通过mint地址查找
                                             let creator = if let Some(ref mint) = mint_address {
                                                 // 尝试从映射表中查找创建者
-                                                find_creator_by_mint(mint).unwrap_or_else(|| "未知".to_string())
+                                                if let Some(c) = find_creator_by_mint(mint) {
+                                                    c
+                                                } else {
+                                                    // 如果找不到，先尝试直接在映射表中查找
+                                                    "未知".to_string()
+                                                }
                                             } else {
                                                 "未知".to_string()
                                             };
@@ -1803,7 +1808,13 @@ fn find_creator_by_mint(mint: &str) -> Option<String> {
         // 修正amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump的创建者地址
         ("amUfFDR5KxiFKpgibmPAPRwhaB9jrPcKWsBVJMhpump", "Hju3K6uRadH7AkynqHGCZgD1W63WNa47h6DuNpTk3xsG"),
         ("A5JqPPSTf3Rc4W9R9CYLRhRowMLZLquweJgR6iDepump", "Eou3bQd3VYUzXxcLBqihFP5J5qK3W3f8Lq5CsX3EY8Yk"),
-        // 添加更多mint->creator映射
+        // 添加新的对应关系
+        ("GFVtnX25mEtpjEXc47X1AKfcd9tdPdds9FdMQoJ1pump", "HNjUCzKFHAqZVvf3mFe89X35aQdNwqKptkwViNNgUzKf"),
+        ("7v1cnL3KtzbHYar9anc8eQGV9NYDMPgYwb526ShUpump", "BYNj1SpM6PxMUVu5hLYVdJxiP5Qv8fQ5eeqZQ213APGj"),
+        ("F7ZDfpnBX13Uy5gK8J4mQLvMpDqa1zhajdUtfvwgpump", "BM2SfEe3rjG48RtNqLHk1KVJqb2EXfz6CuD6epn3U5Ku"),
+        // 金库地址映射到创建者
+        ("7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX", "HNjUCzKFHAqZVvf3mFe89X35aQdNwqKptkwViNNgUzKf"),
+        ("HxmpdosPST3HoZwMg8uV8hg9EoYpisyCQQAP8HAqnMQK", "BM2SfEe3rjG48RtNqLHk1KVJqb2EXfz6CuD6epn3U5Ku"),
     ].iter().cloned().collect();
     
     creator_map.get(mint).map(|s| s.to_string())
@@ -1827,13 +1838,30 @@ fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
                 }
             }
         } else {
+            // 尝试查找创作者金库地址
+            let creator_vault_line = account_data_str.lines()
+                .find(|line| line.trim().contains("创作者金库地址:"));
+            
+            if let Some(line) = creator_vault_line {
+                if let Some(vault_str) = line.trim().split(':').last() {
+                    let vault_str = vault_str.trim();
+                    // 通过金库地址查找创建者
+                    if !vault_str.is_empty() {
+                        if let Some(creator) = find_creator_by_vault(vault_str) {
+                            debug!("[提取] 通过金库地址({})找到创建者: {}", vault_str, creator);
+                            return Some(creator);
+                        }
+                    }
+                }
+            }
+            
             // 尝试解析原始账户数据以获取creator字段
             // 首先检查是否有缓存的原始数据
             if let Some(pubkey_line) = account_data_str.lines().find(|line| line.trim().starts_with("PUBKEY:")) {
                 if let Some(pubkey_str) = pubkey_line.trim().split(':').last() {
                     let pubkey_str = pubkey_str.trim();
                     // 检查是否有数据并尝试读取原始数据
-                    if let Ok(account_pubkey) = Pubkey::from_str(pubkey_str) {
+                    if let Ok(_account_pubkey) = Pubkey::from_str(pubkey_str) {
                         // 这里理想情况下我们应该读取账户数据，但由于我们没有直接访问链的能力
                         // 所以只能通过之前缓存的数据进行解析
                         debug!("[提取] 尝试从账户({})解析创作者字段", pubkey_str);
@@ -1841,7 +1869,7 @@ fn extract_creator_from_account_data(account_data_str: &str) -> Option<String> {
                         // 尝试从mint地址获取，这是后备方案
                         if let Some(mint) = extract_mint_address_from_account_data(account_data_str) {
                             if let Some(creator) = find_creator_by_mint(&mint) {
-                                debug!("[提取] 通过mint({})映射找到创作者: {}", mint, creator);
+                                debug!("[提取] 通过mint({})映射找到创建者: {}", mint, creator);
                                 return Some(creator);
                             }
                         }
@@ -1889,23 +1917,40 @@ fn extract_raw_cpi_log_data(
 
     // 尝试从账户列表中提取创作者相关信息
     if let Some(accounts_array) = accounts.as_array() {
-        // 查找creator_vault账户（如果存在）
-        if let Some(creator_vault) = accounts_array.iter().find(|obj| obj["name"] == "creator_vault") {
+        // 在新IDL中，creator_vault被命名为feeRecipient
+        let creator_vault = accounts_array.iter().find(|obj| {
+            if let Some(name) = obj["name"].as_str() {
+                let name_lower = name.to_lowercase();
+                // 匹配多种可能的名称格式，包括feeRecipient
+                return name_lower == "creator_vault" || 
+                       name_lower == "creatorvault" || 
+                       name_lower == "creator-vault" ||
+                       name_lower == "feerecipient";
+            }
+            false
+        });
+        
+        if let Some(creator_vault) = creator_vault {
             let creator_vault_pubkey = creator_vault["pubkey"].as_str().unwrap_or("").to_string();
             log_data["creator_vault"] = json!(creator_vault_pubkey);
-            debug!("[金库] 交易({})的创作者金库地址: {}", signature, creator_vault_pubkey);
-        }
-        
-        // 查找fee_recipient账户信息
-        if let Some(fee_recipient) = accounts_array.iter().find(|obj| obj["name"] == "fee_recipient") {
-            log_data["fee_recipient"] = json!(fee_recipient["pubkey"].as_str().unwrap_or(""));
+            debug!("找到creator_vault账户(实际名称:{}): {}", creator_vault["name"].as_str().unwrap_or("未知"), creator_vault_pubkey);
+            
+            // 尝试通过creator_vault找到creator
+            if let Some(creator) = find_creator_by_vault(&creator_vault_pubkey) {
+                log_data["creator"] = json!(creator);
+                debug!("[Creator] 通过金库地址({})找到创建者: {}", creator_vault_pubkey, creator);
+            }
+        } else {
+            debug!("未找到creator_vault账户，交易类型: {}, signature: {}", ix.name(), signature);
         }
     }
     
-    // 查找创作者信息
-    let creator = find_creator_by_mint(mint_address);
-    if let Some(creator_address) = creator {
-        log_data["creator"] = json!(creator_address);
+    // 如果还没找到creator，尝试从mint地址查找
+    if !log_data.get("creator").is_some() {
+        if let Some(creator_address) = find_creator_by_mint(mint_address) {
+            log_data["creator"] = json!(creator_address);
+            debug!("[Creator] 通过mint({})找到创建者: {}", mint_address, creator_address);
+        }
     }
     
     // 添加Global账户信息（可用于获取fee_basis_points等）
@@ -1963,6 +2008,7 @@ fn extract_raw_cpi_log_data(
         }
     }
 
+    // 其余代码保持不变
     // 添加所有账户信息
     if let Some(accounts_array) = accounts.as_array() {
         // 完整保存原始账户数组
@@ -2084,5 +2130,16 @@ fn extract_creator_vault_from_log(log_data: &str) -> Option<String> {
         }
     }
     
+    None
+}
+
+/// 从金库地址查找创建者地址
+fn find_creator_by_vault(vault_address: &str) -> Option<String> {
+    // 先尝试直接在映射中查找金库地址
+    if let Some(creator) = find_creator_by_mint(vault_address) {
+        return Some(creator);
+    }
+    
+    // 如果直接查找失败，尝试其他方式
     None
 }
