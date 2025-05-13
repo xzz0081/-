@@ -1812,6 +1812,9 @@ fn find_creator_by_mint(mint: &str) -> Option<String> {
         ("GFVtnX25mEtpjEXc47X1AKfcd9tdPdds9FdMQoJ1pump", "HNjUCzKFHAqZVvf3mFe89X35aQdNwqKptkwViNNgUzKf"),
         ("7v1cnL3KtzbHYar9anc8eQGV9NYDMPgYwb526ShUpump", "BYNj1SpM6PxMUVu5hLYVdJxiP5Qv8fQ5eeqZQ213APGj"),
         ("F7ZDfpnBX13Uy5gK8J4mQLvMpDqa1zhajdUtfvwgpump", "BM2SfEe3rjG48RtNqLHk1KVJqb2EXfz6CuD6epn3U5Ku"),
+        ("85578kyWUYj7kU4GeSKZ8RYoQuhxdxiVc5CXL52spump", "ChcyLqAMCm25LGFhgP9RXAd54oCbKZ1DdDmwkh4dpQsM"),
+        // 特殊账户映射
+        ("54Pgg7FuLuP13dRQoFPTH4FdZHi141bQDzVwukt6m8Tk", "ChcyLqAMCm25LGFhgP9RXAd54oCbKZ1DdDmwkh4dpQsM"), // 这个rent实际是creator_vault
         // 金库地址映射到创建者
         ("7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX", "HNjUCzKFHAqZVvf3mFe89X35aQdNwqKptkwViNNgUzKf"),
         ("HxmpdosPST3HoZwMg8uV8hg9EoYpisyCQQAP8HAqnMQK", "BM2SfEe3rjG48RtNqLHk1KVJqb2EXfz6CuD6epn3U5Ku"),
@@ -1917,31 +1920,74 @@ fn extract_raw_cpi_log_data(
 
     // 尝试从账户列表中提取创作者相关信息
     if let Some(accounts_array) = accounts.as_array() {
-        // 在新IDL中，creator_vault被命名为feeRecipient
+        // 查找创作者金库 - 在新IDL中，可能有多种命名方式
+        let mut creator_vault_pubkey = None;
+        
+        // 1. 首先查找传统的creator_vault名称
         let creator_vault = accounts_array.iter().find(|obj| {
             if let Some(name) = obj["name"].as_str() {
                 let name_lower = name.to_lowercase();
-                // 匹配多种可能的名称格式，包括feeRecipient
                 return name_lower == "creator_vault" || 
                        name_lower == "creatorvault" || 
-                       name_lower == "creator-vault" ||
-                       name_lower == "feerecipient";
+                       name_lower == "creator-vault";
             }
             false
         });
         
-        if let Some(creator_vault) = creator_vault {
-            let creator_vault_pubkey = creator_vault["pubkey"].as_str().unwrap_or("").to_string();
-            log_data["creator_vault"] = json!(creator_vault_pubkey);
-            debug!("找到creator_vault账户(实际名称:{}): {}", creator_vault["name"].as_str().unwrap_or("未知"), creator_vault_pubkey);
+        if let Some(vault) = creator_vault {
+            creator_vault_pubkey = vault["pubkey"].as_str().map(|s| s.to_string());
+        }
+        
+        // 2. 如果没找到，检查rent字段(在某些新版本中，creator_vault被误标为rent)
+        if creator_vault_pubkey.is_none() {
+            if let Some(rent) = accounts_array.iter().find(|obj| obj["name"] == "rent") {
+                // 确认这个rent不是实际的租金账户(实际的租金账户是固定的)
+                let real_rent = "54Pgg7FuLuP13dRQoFPTH4FdZHi141bQDzVwukt6m8Tk";
+                let rent_pubkey = rent["pubkey"].as_str().unwrap_or("");
+                // 如果rent不是常规租金账户，它可能是creator_vault
+                if rent_pubkey != "SysvarRent111111111111111111111111111111111" && 
+                   !rent_pubkey.is_empty() && rent_pubkey != "11111111111111111111111111111111" {
+                    creator_vault_pubkey = Some(rent_pubkey.to_string());
+                    debug!("[金库] 检测到rent({})可能是creator_vault", rent_pubkey);
+                }
+            }
+        }
+        
+        // 3. 如果仍然没找到，检查feeRecipient(有些版本混淆了fee_recipient和creator_vault)
+        if creator_vault_pubkey.is_none() {
+            if let Some(fee_recipient) = accounts_array.iter().find(|obj| {
+                if let Some(name) = obj["name"].as_str() {
+                    let name_lower = name.to_lowercase();
+                    return name_lower == "feerecipient" || name_lower == "fee_recipient";
+                }
+                false
+            }) {
+                let fee_pubkey = fee_recipient["pubkey"].as_str().unwrap_or("");
+                
+                // 先记录fee_recipient
+                log_data["fee_recipient"] = json!(fee_pubkey);
+                
+                // 在某些情况下，feeRecipient实际也是creator_vault
+                if creator_vault_pubkey.is_none() && !fee_pubkey.is_empty() {
+                    // 只在没有找到其他creator_vault时，将fee_recipient视为creator_vault
+                    // 这是一个备选项，但不是首选
+                    debug!("[警告] 未找到明确的creator_vault，暂时使用feeRecipient({})代替", fee_pubkey);
+                }
+            }
+        }
+        
+        // 设置找到的creator_vault
+        if let Some(vault_pubkey) = creator_vault_pubkey {
+            log_data["creator_vault"] = json!(vault_pubkey);
+            debug!("[金库] 交易({})的创作者金库地址: {}", signature, vault_pubkey);
             
             // 尝试通过creator_vault找到creator
-            if let Some(creator) = find_creator_by_vault(&creator_vault_pubkey) {
+            if let Some(creator) = find_creator_by_vault(&vault_pubkey) {
                 log_data["creator"] = json!(creator);
-                debug!("[Creator] 通过金库地址({})找到创建者: {}", creator_vault_pubkey, creator);
+                debug!("[Creator] 通过金库地址({})找到创建者: {}", vault_pubkey, creator);
             }
         } else {
-            debug!("未找到creator_vault账户，交易类型: {}, signature: {}", ix.name(), signature);
+            debug!("[警告] 未找到creator_vault账户，交易类型: {}, signature: {}", ix.name(), signature);
         }
     }
     
@@ -1957,9 +2003,6 @@ fn extract_raw_cpi_log_data(
     if let Some(accounts_array) = accounts.as_array() {
         if let Some(global) = accounts_array.iter().find(|obj| obj["name"] == "global") {
             log_data["global_account"] = json!(global["pubkey"].as_str().unwrap_or(""));
-            
-            // 这里可以添加尝试加载Global账户数据的代码（如果有缓存）
-            // 如果能获取到Global账户数据，就可以提取fee_basis_points和creator_fee_basis_points
         }
     }
     
