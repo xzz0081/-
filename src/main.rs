@@ -113,6 +113,12 @@ impl TransactionCache {
                     } else {
                         warn!("[储备] 无法从曲线账户({})提取虚拟储备信息", curve_account);
                     }
+                    
+                    // 查找并添加创作者金库地址
+                    if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
+                        info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
+                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                    }
                 } else {
                     warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
                 }
@@ -183,6 +189,12 @@ impl TransactionCache {
                         enhanced_data.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", price));
                     } else {
                         warn!("[储备] 无法从曲线账户({})提取虚拟储备信息", curve_account);
+                    }
+                    
+                    // 查找并添加创作者金库地址
+                    if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
+                        info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
                     }
                 } else {
                     warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
@@ -1043,9 +1055,11 @@ async fn geyser_subscribe(
                                                                             );
                                                                             
                                                                             // 如果启用缓存，将Buy交易缓存起来
-                                                                            if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_buy_transaction(&signature, log_message.clone(), Some(&mint_address));
-                                                                            }
+                                                                            // 注意: 由于下面会更新包含creator_vault的交易信息，所以这里不再缓存
+                                                                            // 移除以下缓存代码以避免重复调用
+                                                                            // if let Some(cache_ref) = &cache {
+                                                                            //    cache_ref.cache_buy_transaction(&signature, log_message.clone(), Some(&mint_address));
+                                                                            // }
                                                                             
                                                                             // 保存到CPI日志JSON文件
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
@@ -1117,6 +1131,19 @@ async fn geyser_subscribe(
                                                                                     virtual_token_reserves,
                                                                                     virtual_sol_reserves
                                                                                 );
+                                                                                
+                                                                                // 2. 生成增强版日志消息，包含创作者金库地址信息
+                                                                                let mut enhanced_log_message = log_message.clone();
+                                                                                if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
+                                                                                    let creator_vault_info = format!("\n创作者金库地址: {}", creator_vault);
+                                                                                    enhanced_log_message = format!("{}{}", enhanced_log_message, creator_vault_info);
+                                                                                    info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                }
+                                                                                
+                                                                                // 3. 缓存包含创作者金库信息的完整交易数据
+                                                                                if let Some(cache_ref) = &cache {
+                                                                                    cache_ref.cache_buy_transaction(&signature, enhanced_log_message.clone(), Some(&mint_address));
+                                                                                }
                                                                                 
                                                                                 // 保存原始日志数据
                                                                                 if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
@@ -1166,9 +1193,11 @@ async fn geyser_subscribe(
                                                                             );
                                                                             
                                                                             // 如果启用缓存，将Sell交易缓存起来
-                                                                            if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_sell_transaction(&signature, log_message.clone(), Some(&mint_address));
-                                                                            }
+                                                                            // 注意: 由于下面会更新包含creator_vault的交易信息，所以这里不再缓存
+                                                                            // 移除以下缓存代码以避免重复调用
+                                                                            // if let Some(cache_ref) = &cache {
+                                                                            //    cache_ref.cache_sell_transaction(&signature, log_message.clone(), Some(&mint_address));
+                                                                            // }
                                                                             
                                                                             // 保存到CPI日志JSON文件
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
@@ -1240,6 +1269,19 @@ async fn geyser_subscribe(
                                                                                     virtual_token_reserves,
                                                                                     virtual_sol_reserves
                                                                                 );
+                                                                                
+                                                                                // 2. 生成增强版日志消息，包含创作者金库地址信息
+                                                                                let mut enhanced_log_message = log_message.clone();
+                                                                                if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
+                                                                                    let creator_vault_info = format!("\n创作者金库地址: {}", creator_vault);
+                                                                                    enhanced_log_message = format!("{}{}", enhanced_log_message, creator_vault_info);
+                                                                                    info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                }
+                                                                                
+                                                                                // 3. 缓存包含创作者金库信息的完整交易数据
+                                                                                if let Some(cache_ref) = &cache {
+                                                                                    cache_ref.cache_sell_transaction(&signature, enhanced_log_message.clone(), Some(&mint_address));
+                                                                                }
                                                                                 
                                                                                 // 保存原始日志数据
                                                                                 if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
@@ -1849,7 +1891,9 @@ fn extract_raw_cpi_log_data(
     if let Some(accounts_array) = accounts.as_array() {
         // 查找creator_vault账户（如果存在）
         if let Some(creator_vault) = accounts_array.iter().find(|obj| obj["name"] == "creator_vault") {
-            log_data["creator_vault"] = json!(creator_vault["pubkey"].as_str().unwrap_or(""));
+            let creator_vault_pubkey = creator_vault["pubkey"].as_str().unwrap_or("").to_string();
+            log_data["creator_vault"] = json!(creator_vault_pubkey);
+            debug!("[金库] 交易({})的创作者金库地址: {}", signature, creator_vault_pubkey);
         }
         
         // 查找fee_recipient账户信息
@@ -2012,4 +2056,33 @@ fn get_creator_for_curve(mint_address: Option<&str>) -> String {
         }
     }
     "未知".to_string()
+}
+
+/// 从日志数据中提取创作者金库地址
+fn extract_creator_vault_from_log(log_data: &str) -> Option<String> {
+    // 尝试查找包含创作者金库地址的行
+    if let Some(idx) = log_data.find("创作者金库地址:") {
+        if let Some(end_idx) = log_data[idx..].find('\n') {
+            let vault_line = &log_data[idx..idx+end_idx];
+            if let Some(vault_idx) = vault_line.rfind(':') {
+                return Some(vault_line[vault_idx+1..].trim().to_string());
+            }
+        }
+    }
+    
+    // 检查是否有JSON格式的数据
+    if let Some(start_idx) = log_data.find('{') {
+        if let Some(end_idx) = log_data[start_idx..].rfind('}') {
+            let json_str = &log_data[start_idx..start_idx+end_idx+1];
+            if let Ok(json_value) = serde_json::from_str::<Value>(json_str) {
+                if let Some(creator_vault) = json_value.get("creator_vault") {
+                    if let Some(vault_str) = creator_vault.as_str() {
+                        return Some(vault_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }
