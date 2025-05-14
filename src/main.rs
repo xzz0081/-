@@ -116,8 +116,11 @@ impl TransactionCache {
                     
                     // 查找并添加创作者金库地址
                     if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
-                        info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
-                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                        // 检查是否已包含金库地址信息
+                        if !enhanced_data.contains("创作者金库地址:") {
+                            info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
+                            enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                        }
                     }
                 } else {
                     warn!("[缓存] 未找到曲线账户({})的数据", curve_account);
@@ -160,8 +163,11 @@ impl TransactionCache {
         // 先提取交易信息中是否已包含创作者金库地址
         let mut enhanced_data = data.clone();
         if let Some(creator_vault) = extract_creator_vault_from_log(data.as_str()) {
-            info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
-            enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+            // 检查是否已包含金库地址信息
+            if !enhanced_data.contains("创作者金库地址:") {
+                info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+            }
         } else {
             // 如果未找到创作者金库地址，尝试检查是否有对应的associatedTokenProgram
             if data.contains("associatedTokenProgram") || data.contains("associatedtokenprogram") || data.contains("associated_token_program") {
@@ -171,8 +177,11 @@ impl TransactionCache {
                         let line = &data[start_idx..start_idx+end_line];
                         if let Some(pubkey_start) = line.rfind(':') {
                             let pubkey = line[pubkey_start+1..].trim();
-                            info!("[金库] Sell交易({})从associatedTokenProgram识别创作者金库地址: {}", signature, pubkey);
-                            enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", pubkey));
+                            // 检查是否已包含金库地址信息
+                            if !enhanced_data.contains("创作者金库地址:") {
+                                info!("[金库] Sell交易({})从associatedTokenProgram识别创作者金库地址: {}", signature, pubkey);
+                                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", pubkey));
+                            }
                         }
                     }
                 }
@@ -1130,8 +1139,20 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 提取金库地址并更新日志信息 - 这步是关键，无论是否保存CPI日志都需要
                                                                             if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
-                                                                                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
-                                                                                info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                // 检查是否已包含金库地址信息
+                                                                                if !enhanced_data.contains("创作者金库地址:") {
+                                                                                    enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                                                                                    info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                }
+                                                                            } else {
+                                                                                // 如果从raw_log_data中未找到，尝试从原始日志中提取
+                                                                                if let Some(cv) = extract_creator_vault_from_log(log_message.as_str()) {
+                                                                                    // 检查是否已包含金库地址信息
+                                                                                    if !enhanced_data.contains("创作者金库地址:") {
+                                                                                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
+                                                                                        info!("[金库] Buy交易({})的创作者金库地址: {}", signature, cv);
+                                                                                    }
+                                                                                }
                                                                             }
                                                                             
                                                                             // 缓存包含创作者金库信息的完整交易数据
@@ -1248,13 +1269,19 @@ async fn geyser_subscribe(
                                                                             
                                                                             // 提取金库地址并更新日志信息 - 这步是关键，无论是否保存CPI日志都需要
                                                                             if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
-                                                                                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
-                                                                                info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                // 检查是否已包含金库地址信息
+                                                                                if !enhanced_data.contains("创作者金库地址:") {
+                                                                                    enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                                                                                    info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                                }
                                                                             } else {
                                                                                 // 如果从raw_log_data中未找到，尝试从原始日志中提取
                                                                                 if let Some(cv) = extract_creator_vault_from_log(log_message.as_str()) {
-                                                                                    enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
-                                                                                    info!("[金库] Sell交易({})的创作者金库地址: {}", signature, cv);
+                                                                                    // 检查是否已包含金库地址信息
+                                                                                    if !enhanced_data.contains("创作者金库地址:") {
+                                                                                        enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
+                                                                                        info!("[金库] Sell交易({})的创作者金库地址: {}", signature, cv);
+                                                                                    }
                                                                                 }
                                                                             }
                                                                             
