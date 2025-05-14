@@ -196,16 +196,30 @@ impl TransactionCache {
                 if let Some(curve) = calculate_curve_account_from_mint(mint_address) {
                     info!("[关联] Sell交易({})关联到曲线账户({})", signature, curve);
                     
+                    // 添加曲线账户信息到enhanced_data
+                    enhanced_data.push_str("\n\n关联曲线账户:\n");
+                    enhanced_data.push_str(&curve);
+                    
                     // 尝试从曲线账户获取储备和价格信息
                     if let Some(reserves_data) = self.get_account_data(&curve) {
+                        // 添加曲线账户数据到enhanced_data
+                        enhanced_data.push_str("\n\n绑定曲线账户数据:\n");
+                        enhanced_data.push_str(&reserves_data);
+                        
                         if let Some((vt, vs)) = extract_reserves_from_account_data(&reserves_data) {
                             // 记录该mint最新的储备信息
                             self.latest_reserves.insert(mint_address.to_string(), (vt, vs));
                             info!("[储备] Sell交易({})的虚拟储备 - 代币: {}, SOL: {}", signature, vt, vs);
                             
+                            // 添加虚拟储备信息到enhanced_data
+                            enhanced_data.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
+                            
                             // 计算价格
                             let price = calculate_price(vt, vs);
                             info!("[价格] Sell交易({})的代币价格: {} SOL", signature, price);
+                            
+                            // 添加价格信息到enhanced_data
+                            enhanced_data.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", price));
                         }
                     }
                 }
@@ -213,7 +227,10 @@ impl TransactionCache {
         }
 
         // 缓存交易
-        self.sell_transactions.insert(signature.to_string(), cache_item);
+        self.sell_transactions.insert(signature.to_string(), CacheItem {
+            data: enhanced_data.clone(),
+            timestamp: SystemTime::now(),
+        });
         
         // 尝试存储到Redis
         if let Ok(mut conn) = self.redis_client.get_connection() {
