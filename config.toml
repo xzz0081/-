@@ -37,7 +37,7 @@ log_to_file = false
 # 日志文件路径
 log_file_path = "logs/transactions.log"
 # 是否将CPI日志保存为JSON文件
-cpi_log_json = true
+cpi_log_json = false
 # CPI日志JSON文件保存目录
 cpi_log_json_dir = "logs/cpi_json"
 # 保存的最大文件数量
