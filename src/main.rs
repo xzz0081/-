@@ -137,13 +137,13 @@ impl TransactionCache {
         self.buy_transactions.insert(signature.to_string(), cache_item);
 
         let client_clone = Arc::clone(&self.redis_client);
-        let key = format!("tx:{}", signature); // 统一使用tx:前缀
+        let key = signature.to_string(); // 直接使用签名作为键，不添加前缀
         let enhanced_data_clone = enhanced_data.clone(); // 克隆数据
         tokio::spawn(async move {
             let mut con = match client_clone.get_multiplexed_tokio_connection().await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("[Redis] 获取连接失败 (tx - sig: {}): {}", key, e);
+                    error!("[Redis] 获取连接失败 (sig: {}): {}", key, e);
                     return;
                 }
             };
@@ -243,9 +243,9 @@ impl TransactionCache {
         
         // 尝试存储到Redis
         if let Ok(mut conn) = self.redis_client.get_connection() {
-            let key = format!("tx:{}", signature); // 统一使用tx:前缀
+            let key = signature.to_string(); // 直接使用签名作为键，不添加前缀
             if let Err(e) = redis::cmd("SET").arg(&key).arg(&enhanced_data).query::<()>(&mut conn) {
-                error!("[Redis] 存储交易失败 (tx - sig: {}): {}", key, e);
+                error!("[Redis] 存储交易失败 (sig: {}): {}", key, e);
             } else {
                 debug!("[Redis] 成功缓存交易 (sig: {})", key);
                 // 设置过期时间
