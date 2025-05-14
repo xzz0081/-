@@ -1070,6 +1070,9 @@ async fn geyser_subscribe(
                                                                                 signer_address
                                                                             );
                                                                             
+                                                                            // 初始化增强版日志信息
+                                                                            let mut enhanced_data = log_message.clone();
+                                                                            
                                                                             // 如果启用缓存，将Buy交易缓存起来
                                                                             // 注意: 由于下面会更新包含creator_vault的交易信息，所以这里不再缓存
                                                                             // 移除以下缓存代码以避免重复调用
@@ -1086,8 +1089,8 @@ async fn geyser_subscribe(
                                                                             let mut virtual_sol_reserves = None;
                                                                             let mut price = None;
                                                                             let mut creator = None;
-                                                                            let mut fee_basis_points = None;
-                                                                            let mut creator_fee_basis_points = None;
+                                                                            let mut fee_basis_points: Option<u64> = None;
+                                                                            let mut creator_fee_basis_points: Option<u64> = None;
                                                                             
                                                                             // 如果有曲线账户，尝试获取曲线账户数据和储备信息
                                                                             if let Some(ref curve_account_str) = curve_account {
@@ -1099,88 +1102,47 @@ async fn geyser_subscribe(
                                                                                             price = Some(calculate_price(vt, vs));
                                                                                         }
                                                                                         
-                                                                                        // 尝试获取代币创建者信息直接从BondingCurve账户数据中提取
+                                                                                        // 尝试获取代币创建者信息
                                                                                         creator = extract_creator_from_account_data(&curve_data);
-                                                                                        if let Some(ref c) = creator {
-                                                                                            debug!("[Creator] 从曲线账户({})数据中提取到创建者: {}", curve_account_str, c);
-                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
                                                                             
-                                                                            // 如果从账户数据中未找到creator，尝试从映射表中查找
-                                                                            if creator.is_none() {
-                                                                                creator = find_creator_by_mint(&mint_address);
-                                                                                if let Some(ref c) = creator {
-                                                                                    debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
-                                                                                }
+                                                                            // 提取原始交易数据以获取金库地址，无论是否启用CPI日志
+                                                                            let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
+                                                                                serde_json::from_str(&json_string).unwrap_or_default()
+                                                                            } else {
+                                                                                Value::Null
+                                                                            };
+                                                                            
+                                                                            // 保存原始交易数据中提取金库地址
+                                                                            let raw_log_data = extract_raw_cpi_log_data(
+                                                                                &decoded_ix,
+                                                                                &signature,
+                                                                                &parsed_json["accounts"],
+                                                                                &mint_address,
+                                                                                &signer_address,
+                                                                                &formatted_time,
+                                                                                &curve_account,
+                                                                                virtual_token_reserves,
+                                                                                virtual_sol_reserves
+                                                                            );
+                                                                            
+                                                                            // 提取金库地址并更新日志信息 - 这步是关键，无论是否保存CPI日志都需要
+                                                                            if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
+                                                                                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                                                                                info!("[金库] Buy交易({})的创作者金库地址: {}", signature, creator_vault);
                                                                             }
                                                                             
-                                                                            // 尝试获取全局账户数据以获取fee_basis_points和creator_fee_basis_points
-                                                                            let global_account = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"; // 全局账户公钥
+                                                                            // 缓存包含创作者金库信息的完整交易数据
                                                                             if let Some(cache_ref) = &cache {
-                                                                                if let Some(global_data) = cache_ref.get_account_data(global_account) {
-                                                                                    // 这里应该解析Global账户数据，提取fee_basis_points和creator_fee_basis_points
-                                                                                    // 简化处理，使用默认值
-                                                                                    fee_basis_points = Some(30); // 0.3%
-                                                                                    creator_fee_basis_points = Some(100); // 1%
-                                                                                }
+                                                                                cache_ref.cache_buy_transaction(&signature, enhanced_data.clone(), Some(&mint_address));
                                                                             }
                                                                             
-                                                                            // 准备增强版日志消息
-                                                                            let mut enhanced_log_message = log_message.clone();
-                                                                            
-                                                                            // 为增强版日志消息添加曲线账户信息
-                                                                            if let Some(ref ca) = curve_account {
-                                                                                enhanced_log_message.push_str(&format!("\n\n关联曲线账户:\n{}", ca));
-                                                                            }
-                                                                            
-                                                                            // 添加虚拟储备和价格信息到增强版日志
-                                                                            if let (Some(vt), Some(vs)) = (virtual_token_reserves, virtual_sol_reserves) {
-                                                                                enhanced_log_message.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
-                                                                                
-                                                                                if let Some(p) = price {
-                                                                                    enhanced_log_message.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", p));
-                                                                                }
-                                                                            }
-                                                                            
-                                                                            // 尝试提取创作者金库地址
-                                                                            let mut creator_vault = None;
-                                                                            if let Some(cv) = extract_creator_vault_from_log(log_message.as_str()) {
-                                                                                enhanced_log_message.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
-                                                                                creator_vault = Some(cv.clone());
-                                                                                info!("[金库] Buy交易({})的创作者金库地址: {}", signature, cv);
-                                                                            }
-                                                                            
-                                                                            // 缓存包含所有信息的增强版交易数据
-                                                                            if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_buy_transaction(&signature, enhanced_log_message.clone(), Some(&mint_address));
-                                                                            }
-                                                                            
-                                                                            // 保存到CPI日志JSON文件（仅当该功能启用时）
+                                                                            // 保存CPI日志到JSON文件（仅当该功能启用时）
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
-                                                                                // 为CPI日志准备JSON数据
-                                                                                let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
-                                                                                    serde_json::from_str(&json_string).unwrap_or_default()
-                                                                                } else {
-                                                                                    Value::Null
-                                                                                };
-                                                                                
-                                                                                // 1. 保存原始交易数据
-                                                                                let raw_log_data = extract_raw_cpi_log_data(
-                                                                                    &decoded_ix,
-                                                                                    &signature,
-                                                                                    &parsed_json["accounts"],
-                                                                                    &mint_address,
-                                                                                    &signer_address,
-                                                                                    &formatted_time,
-                                                                                    &curve_account,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves
-                                                                                );
-                                                                                
                                                                                 // 保存原始日志数据
-                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data.clone(), &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
                                                                                     warn!("保存原始CPI日志到JSON文件失败: {}", e);
                                                                                 }
                                                                             }
@@ -1226,6 +1188,9 @@ async fn geyser_subscribe(
                                                                                 signer_address
                                                                             );
                                                                             
+                                                                            // 初始化增强版日志信息
+                                                                            let mut enhanced_data = log_message.clone();
+                                                                            
                                                                             // 如果启用缓存，将Sell交易缓存起来
                                                                             // 注意: 由于下面会更新包含creator_vault的交易信息，所以这里不再缓存
                                                                             // 移除以下缓存代码以避免重复调用
@@ -1242,8 +1207,8 @@ async fn geyser_subscribe(
                                                                             let mut virtual_sol_reserves = None;
                                                                             let mut price = None;
                                                                             let mut creator = None;
-                                                                            let mut fee_basis_points = None;
-                                                                            let mut creator_fee_basis_points = None;
+                                                                            let mut fee_basis_points: Option<u64> = None;
+                                                                            let mut creator_fee_basis_points: Option<u64> = None;
                                                                             
                                                                             // 如果有曲线账户，尝试获取曲线账户数据和储备信息
                                                                             if let Some(ref curve_account_str) = curve_account {
@@ -1255,88 +1220,53 @@ async fn geyser_subscribe(
                                                                                             price = Some(calculate_price(vt, vs));
                                                                                         }
                                                                                         
-                                                                                        // 尝试获取代币创建者信息直接从BondingCurve账户数据中提取
+                                                                                        // 尝试获取代币创建者信息
                                                                                         creator = extract_creator_from_account_data(&curve_data);
-                                                                                        if let Some(ref c) = creator {
-                                                                                            debug!("[Creator] 从曲线账户({})数据中提取到创建者: {}", curve_account_str, c);
-                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
                                                                             
-                                                                            // 如果从账户数据中未找到creator，尝试从映射表中查找
-                                                                            if creator.is_none() {
-                                                                                creator = find_creator_by_mint(&mint_address);
-                                                                                if let Some(ref c) = creator {
-                                                                                    debug!("[Creator] 通过映射表找到代币({})的创建者: {}", mint_address, c);
+                                                                            // 提取原始交易数据以获取金库地址，无论是否启用CPI日志
+                                                                            let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
+                                                                                serde_json::from_str(&json_string).unwrap_or_default()
+                                                                            } else {
+                                                                                Value::Null
+                                                                            };
+                                                                            
+                                                                            // 保存原始交易数据中提取金库地址
+                                                                            let raw_log_data = extract_raw_cpi_log_data(
+                                                                                &decoded_ix,
+                                                                                &signature,
+                                                                                &parsed_json["accounts"],
+                                                                                &mint_address,
+                                                                                &signer_address,
+                                                                                &formatted_time,
+                                                                                &curve_account,
+                                                                                virtual_token_reserves,
+                                                                                virtual_sol_reserves
+                                                                            );
+                                                                            
+                                                                            // 提取金库地址并更新日志信息 - 这步是关键，无论是否保存CPI日志都需要
+                                                                            if let Some(creator_vault) = raw_log_data.get("creator_vault").and_then(|v| v.as_str()) {
+                                                                                enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", creator_vault));
+                                                                                info!("[金库] Sell交易({})的创作者金库地址: {}", signature, creator_vault);
+                                                                            } else {
+                                                                                // 如果从raw_log_data中未找到，尝试从原始日志中提取
+                                                                                if let Some(cv) = extract_creator_vault_from_log(log_message.as_str()) {
+                                                                                    enhanced_data.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
+                                                                                    info!("[金库] Sell交易({})的创作者金库地址: {}", signature, cv);
                                                                                 }
                                                                             }
                                                                             
-                                                                            // 尝试获取全局账户数据以获取fee_basis_points和creator_fee_basis_points
-                                                                            let global_account = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"; // 全局账户公钥
+                                                                            // 缓存包含创作者金库信息的完整交易数据
                                                                             if let Some(cache_ref) = &cache {
-                                                                                if let Some(global_data) = cache_ref.get_account_data(global_account) {
-                                                                                    // 这里应该解析Global账户数据，提取fee_basis_points和creator_fee_basis_points
-                                                                                    // 简化处理，使用默认值
-                                                                                    fee_basis_points = Some(30); // 0.3%
-                                                                                    creator_fee_basis_points = Some(100); // 1%
-                                                                                }
+                                                                                cache_ref.cache_sell_transaction(&signature, enhanced_data.clone(), Some(&mint_address));
                                                                             }
                                                                             
-                                                                            // 准备原始交易数据和增强版日志消息
-                                                                            let mut enhanced_log_message = log_message.clone();
-                                                                            
-                                                                            // 为增强版日志消息添加曲线账户信息
-                                                                            if let Some(ref ca) = curve_account {
-                                                                                enhanced_log_message.push_str(&format!("\n\n关联曲线账户:\n{}", ca));
-                                                                            }
-                                                                            
-                                                                            // 添加虚拟储备和价格信息到增强版日志
-                                                                            if let (Some(vt), Some(vs)) = (virtual_token_reserves, virtual_sol_reserves) {
-                                                                                enhanced_log_message.push_str(&format!("\n\n虚拟储备信息:\n虚拟代币储备: {}\n虚拟SOL储备: {}", vt, vs));
-                                                                                
-                                                                                if let Some(p) = price {
-                                                                                    enhanced_log_message.push_str(&format!("\n\n价格信息:\n当前价格: {} SOL", p));
-                                                                                }
-                                                                            }
-                                                                            
-                                                                            // 尝试提取创作者金库地址
-                                                                            let mut creator_vault = None;
-                                                                            if let Some(cv) = extract_creator_vault_from_log(log_message.as_str()) {
-                                                                                enhanced_log_message.push_str(&format!("\n\n创作者金库地址:\n{}", cv));
-                                                                                creator_vault = Some(cv.clone());
-                                                                                info!("[金库] Sell交易({})的创作者金库地址: {}", signature, cv);
-                                                                            }
-                                                                            
-                                                                            // 缓存包含所有信息的增强版交易数据
-                                                                            if let Some(cache_ref) = &cache {
-                                                                                cache_ref.cache_sell_transaction(&signature, enhanced_log_message.clone(), Some(&mint_address));
-                                                                            }
-                                                                            
-                                                                            // 保存到CPI日志JSON文件（仅当该功能启用时）
+                                                                            // 保存CPI日志到JSON文件（仅当该功能启用时）
                                                                             if features.cpi_log_json && !features.cpi_log_json_dir.is_empty() {
-                                                                                // 为修正问题，首先确认parsed_json是在这个作用域可用的
-                                                                                let parsed_json: Value = if let Ok(json_string) = serde_json::to_string_pretty(&decoded_instruction) {
-                                                                                    serde_json::from_str(&json_string).unwrap_or_default()
-                                                                                } else {
-                                                                                    Value::Null
-                                                                                };
-                                                                                
-                                                                                // 1. 保存原始交易数据
-                                                                                let raw_log_data = extract_raw_cpi_log_data(
-                                                                                    &decoded_ix,
-                                                                                    &signature,
-                                                                                    &parsed_json["accounts"],
-                                                                                    &mint_address,
-                                                                                    &signer_address,
-                                                                                    &formatted_time,
-                                                                                    &curve_account,
-                                                                                    virtual_token_reserves,
-                                                                                    virtual_sol_reserves
-                                                                                );
-                                                                                
                                                                                 // 保存原始日志数据
-                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data, &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
+                                                                                if let Err(e) = save_raw_cpi_log_to_json(raw_log_data.clone(), &features.cpi_log_json_dir, features.cpi_log_json_max_files) {
                                                                                     warn!("保存原始CPI日志到JSON文件失败: {}", e);
                                                                                 }
                                                                             }
